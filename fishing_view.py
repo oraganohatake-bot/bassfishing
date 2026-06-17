@@ -1,0 +1,2629 @@
+"""FishingView – Phase 3: retrieve actions, staged fish reactions, bite charge."""
+
+from __future__ import annotations
+
+import copy
+import math
+import random
+from typing import Optional, Tuple
+
+import pygame
+
+from constants import (
+    SCREEN_W, SCREEN_H, UW_SIZE,
+    FS_IDLE, FS_CAST_CHARGE, FS_CASTING, FS_RETRIEVE, FS_BITE, FS_FIGHT,
+    FS_KEEP_RELEASE, FS_RESULT,
+    CAST_PERFECT, CAST_GOOD, CAST_EARLY, CAST_LATE,
+    HOOKSET_DELAY, HOOKSET_AUTO, HOOKSET_HYBRID, HOOKSET_VISUAL_DELAY,
+    BITE_LIGHT_TICK, BITE_MEDIUM_TICK, BITE_HEAVY_STRIKE,
+    ACTION_IDLE, ACTION_RETRIEVE, ACTION_STOP,
+    ACTION_TWITCH, ACTION_LIFT, ACTION_FALL,
+    REACT_IGNORE, REACT_NOTICE, REACT_APPROACH,
+    REACT_CHASE, REACT_BITE, REACT_SPOOK, FISH_CAUGHT,
+    REACTION_PRIORITY,
+    TERRAIN_WEED, TERRAIN_COVER, TERRAIN_BREAK, TERRAIN_ROCK,
+    C_WHITE, C_BLACK, C_GRAY, C_YELLOW, C_GREEN, C_DARK, C_RED,
+    C_FISH_IDLE, C_FISH_ACTIVE, C_LURE,
+    C_FISH_NOTICE, C_FISH_APPROACH, C_FISH_BITE_COL, C_FISH_SPOOK,
+    C_FLAT, C_WEED_CELL, C_COVER_CELL, C_BREAK_CELL, C_ROCK_CELL,
+)
+from spot_templates import SPOT_CONFIGS, DEFAULT_CONFIG
+from underwater_map import UnderwaterMap
+from fish import Fish
+from lure import Lure
+from lure_catalog import LURE_CATALOG, get_spec_by_idx
+from save_manager import SaveManager
+from environment import Environment
+from fish_population import FishPopulationManager, FishIndividual
+from rod import RodController
+from fight_system import (
+    FightState, T_BLUE, T_GREEN, T_YELLOW,
+    OUTCOME_LANDED, OUTCOME_HOOKOUT, OUTCOME_LINE_BREAK,
+    LANDING_DIST_M,
+)
+import tuning as TU
+
+# ── Layout ────────────────────────────────────────────────────────────
+MAIN_W    = 990
+SIDEBAR_X = 990
+SIDEBAR_W = SCREEN_W - SIDEBAR_X
+
+SKY_Y0   = 0
+SKY_Y1   = 210
+SHORE_Y0 = 210
+SHORE_Y1 = 270
+WATER_Y0 = 270    # horizon
+WATER_Y1 = 510    # gradient end (visual)
+WATER_NEAR_Y = 655  # near water edge: リトリーブ/キャスト可能エリアの手前端
+
+CELL_PX    = 8
+UW_GRID_X  = SIDEBAR_X + 12
+UW_GRID_Y  = 46
+
+BITE_FRAMES   = 150
+RESULT_FRAMES = 200
+
+# ── Cast accuracy ────────────────────────────────────────────────────
+CAST_MAX_ERR   = 4
+INTENDED_FRAMES = 70
+
+# ── Beta v0.9: Cast charge gauge (パラメータは tuning.py に集約) ─────
+CAST_CHARGE_RATE   = TU.CAST_CHARGE_RATE
+CAST_CHARGE_MAX    = TU.CAST_CHARGE_MAX
+CAST_PERFECT_LO    = TU.CAST_PERFECT_LO
+CAST_PERFECT_HI    = TU.CAST_PERFECT_HI
+CAST_GOOD_LO       = TU.CAST_GOOD_LO
+
+# Cast quality → (gauss σ, clamp cells)
+_CAST_DEVIATION: dict = {
+    CAST_PERFECT: TU.CAST_DEV_PERFECT,
+    CAST_GOOD:    TU.CAST_DEV_GOOD,
+    CAST_EARLY:   TU.CAST_DEV_EARLY,
+    CAST_LATE:    TU.CAST_DEV_LATE,
+}
+
+# ── Beta v0.9: Hookset mode / bite type per lure name ────────────────
+_HOOKSET_MODE: dict = {
+    "Minnow":      HOOKSET_HYBRID,
+    "Crankbait":   HOOKSET_AUTO,
+    "Spinnerbait": HOOKSET_AUTO,
+    "Worm":        HOOKSET_DELAY,
+    "Jig":         HOOKSET_DELAY,
+    "Topwater":    HOOKSET_VISUAL_DELAY,
+}
+_BITE_TYPE: dict = {
+    "Minnow":      BITE_MEDIUM_TICK,
+    "Crankbait":   BITE_HEAVY_STRIKE,
+    "Spinnerbait": BITE_HEAVY_STRIKE,
+    "Worm":        BITE_LIGHT_TICK,
+    "Jig":         BITE_MEDIUM_TICK,
+    "Topwater":    BITE_HEAVY_STRIKE,   # バシャ! (視覚はSPLASH演出)
+}
+
+# Bite-mode timeouts (frames since bite cue)
+_BITE_TIMEOUT: dict = {
+    HOOKSET_DELAY:        TU.DELAY_TIMEOUT,
+    HOOKSET_HYBRID:       TU.HYBRID_TIMEOUT,
+    HOOKSET_VISUAL_DELAY: 999,   # weight_on + TOPWATER_TIMEOUT_AFTER で個別判定
+    HOOKSET_AUTO:         TU.AUTO_TIMEOUT,
+}
+
+# ── Beta v0.9: Fight threshold ───────────────────────────────────────
+FIGHT_MIN_SIZE = TU.FIGHT_MIN_SIZE   # このサイズ以上でファイト発生
+
+# ── Beta v0.9: Reel input (パラメータは tuning.py に集約) ─────────────
+REEL_TAP_FRAMES   = TU.REEL_TAP_FRAMES
+REEL_FAST_CLICKS  = TU.REEL_FAST_CLICKS
+REEL_FAST_WINDOW  = TU.REEL_FAST_WINDOW
+REEL_FAST_FRAMES  = TU.REEL_FAST_FRAMES
+REEL_CREEP_FRAMES = TU.REEL_CREEP_FRAMES
+
+# ── Rod anchor (一人称視点; プレイヤーの手元) ────────────────────────
+# バットは画面下端のさらに下から伸びる = プレイヤーの手元から出ている表現。
+# x はプレイヤーの立ち位置 (player_stance_x) に連動 (FishingView.rod_anchor)。
+ROD_BASE_Y = SCREEN_H + 18
+ROD_ANCHOR = (MAIN_W // 2, ROD_BASE_Y)   # 後方互換のデフォルト (中央立ち)
+
+# ── Pin-spot thresholds ──────────────────────────────────────────────
+PIN_HIGH_SCORE = 6.0
+PIN_LOW_SCORE  = 3.0
+PIN_SMALL_LIMIT = 34.0
+
+# ── Bite charge (パラメータは tuning.py に集約) ──────────────────────
+BITE_TRIGGER = TU.BITE_TRIGGER     # charge threshold → HIT!
+
+# Charge rate per action when fish is in bite range
+_CHARGE_RATE: dict = {
+    ACTION_STOP:     TU.BITE_CHARGE_RATE_STOP,
+    ACTION_TWITCH:   TU.BITE_CHARGE_RATE_TWITCH,
+    ACTION_FALL:     TU.BITE_CHARGE_RATE_FALL,
+    ACTION_LIFT:     TU.BITE_CHARGE_RATE_LIFT,
+    ACTION_RETRIEVE: TU.BITE_CHARGE_RATE_RETRIEVE,
+    ACTION_IDLE:     TU.BITE_CHARGE_RATE_IDLE,
+}
+
+# ── Debug ─────────────────────────────────────────────────────────────
+_MAX_SCORE_VIS = 12.0
+
+
+def _score_to_heat(score: float) -> Tuple[int, int, int]:
+    t = min(1.0, score / _MAX_SCORE_VIS)
+    if t < 0.35:
+        k = t / 0.35
+        return (int(k * 30), int(k * 90), int(140 + k * 60))
+    elif t < 0.70:
+        k = (t - 0.35) / 0.35
+        return (int(30 + k * 210), int(90 + k * 120), int(200 - k * 150))
+    else:
+        k = (t - 0.70) / 0.30
+        return (240, int(210 - k * 210), max(0, int(50 - k * 50)))
+
+
+# ── Action display metadata ───────────────────────────────────────────
+_ACTION_COLOR: dict = {
+    ACTION_IDLE:     (140, 140, 140),
+    ACTION_RETRIEVE: ( 70, 160, 220),
+    ACTION_STOP:     (255, 220,  50),
+    ACTION_TWITCH:   (255, 140,   0),
+    ACTION_LIFT:     ( 50, 220, 200),
+    ACTION_FALL:     ( 80, 120, 200),
+}
+_ACTION_LABEL: dict = {
+    ACTION_IDLE:     "IDLE",
+    ACTION_RETRIEVE: "RETRIEVE",
+    ACTION_STOP:     "STOP  ▸",
+    ACTION_TWITCH:   "TWITCH",
+    ACTION_LIFT:     "LIFT  ▲",
+    ACTION_FALL:     "FALL  ▼",
+}
+
+# ── Fish reaction display metadata ────────────────────────────────────
+_REACT_COLOR: dict = {
+    REACT_IGNORE:  (130, 130, 130),
+    REACT_NOTICE:  C_FISH_NOTICE,
+    REACT_APPROACH:C_FISH_APPROACH,
+    REACT_CHASE:   C_FISH_ACTIVE,
+    REACT_BITE:    C_FISH_BITE_COL,
+    REACT_SPOOK:   C_FISH_SPOOK,
+    FISH_CAUGHT:   (60, 60, 60),
+}
+_REACT_LABEL: dict = {
+    REACT_IGNORE:  "ignore",
+    REACT_NOTICE:  "notice",
+    REACT_APPROACH:"approach",
+    REACT_CHASE:   "CHASE",
+    REACT_BITE:    "BITE!",
+    REACT_SPOOK:   "spooked",
+    FISH_CAUGHT:   "caught",
+}
+
+
+def _draw_bar(
+    surface: pygame.Surface,
+    x: int, y: int, w: int, h: int,
+    fill: float,
+    color: tuple,
+    bg: tuple = (50, 50, 50),
+) -> None:
+    pygame.draw.rect(surface, bg,    (x, y, w, h))
+    fw = max(0, int(w * max(0.0, min(1.0, fill))))
+    if fw:
+        pygame.draw.rect(surface, color, (x, y, fw, h))
+    pygame.draw.rect(surface, (90, 90, 90), (x, y, w, h), 1)
+
+
+# ══════════════════════════════════════════════════════════════════════
+class FishingView:
+    """Complete fishing scene: rendering, lure actions, fish AI, catch log."""
+
+    def __init__(
+        self,
+        spot_name: str,
+        seed: int = 42,
+        save_manager: Optional[SaveManager] = None,
+        environment: Optional[Environment] = None,
+        fish_population: Optional[FishPopulationManager] = None,
+        test_big_fish: bool = False,
+    ) -> None:
+        self.spot_name = spot_name
+        self.state = FS_IDLE
+        self._save_manager = save_manager
+        self._env = environment
+        self._population = fish_population
+        # Beta v0.9: F4 大型魚テストモード (52/58/64cm を追加スポーン)
+        self._test_big_fish = test_big_fish
+
+        config = SPOT_CONFIGS.get(spot_name, DEFAULT_CONFIG)
+        self.spot_label: str = config.get("label", "")
+
+        # プレイヤーの立ち位置 (足場) — ライン角度/アプローチ角を決める。
+        # 釣りビューに入った時点で岸位置から決まる (今は spot/seed から決定的に導出)。
+        # 0.0=左端の岸, 0.5=正面, 1.0=右端の岸。将来は釣りビュー内で左右移動可に。
+        stance_seed = (hash(spot_name) ^ (seed * 2654435761)) & 0xFFFF
+        self.player_stance_x: float = 0.30 + 0.40 * (stance_seed % 1000) / 1000.0
+
+        # キャストカーソル (キャスト前に十字キーで動かす狙い点; セル単位)。
+        # 立ち位置の正面・中距離を初期位置とする。
+        self.cast_cursor_x: float = self.player_stance_x * (UW_SIZE - 1)
+        self.cast_cursor_y: float = (UW_SIZE - 1) * 0.40
+
+        rng = random.Random(seed)
+        self.uw_map = UnderwaterMap(seed, config=config)
+        self._lure_idx: int = 0
+        self.lure = Lure(lure_type=LURE_CATALOG[0].name)
+        self.fishes = self._spawn_fish(rng)
+        self.catch_log: list = []
+
+        self._bite_timer   = 0
+        self._result_timer = 0
+        self._result_fish: Optional[Fish] = None
+        self._result_is_pb: bool = False
+        self._splash_timer = 0
+        self._frame_count  = 0
+
+        # Phase 10: Catch & Release state
+        self._result_action:      str   = ""    # "KEEP" or "RELEASE"
+        self._result_reward:      int   = 0
+        self._result_size:        float = 0.0   # stored for display after fish removed
+        self._result_fish_id:     str   = ""
+        self._result_is_recapture: bool = False
+        self._recapture_prev: Optional[object] = None  # FishHistory snapshot
+
+        # Cast accuracy
+        self._intended_pos: Optional[Tuple[int, int]] = None
+        self._intended_timer = 0
+
+        # Bite charge
+        self._bite_charge: float = 0.0
+
+        # ── Beta v0.9: Rod / Cast / Reel / Bite / Fight ───────────────
+        self.rod = RodController()
+
+        # キャストゲージ (0→100→0 を往復するピンポン式)
+        self._cast_charge: float = 0.0
+        self._cast_dir: int = 1
+        self._cast_aim: Optional[Tuple[int, int]] = None
+        self._cast_quality: str = ""
+        self._cast_quality_timer: int = 0
+
+        # キャスト飛行演出 (FS_CASTING): ルアーが手元 → 着水点へ放物線で飛ぶ
+        self._cast_flight_start: Tuple[float, float] = (0.0, 0.0)   # 画面座標(手元/ティップ)
+        self._cast_flight_target: Tuple[float, float] = (0.0, 0.0)  # 画面座標(着水点)
+        self._cast_flight_cell: Tuple[int, int] = (0, 0)            # 着水セル
+        self._cast_flight_timer: int = 0
+        self._cast_flight_duration: int = 0
+        self._cast_arc_height: float = 0.0
+        self._cast_flight_trail: list = []   # 軌跡 (画面座標)
+
+        # リール入力トラッキング
+        self._reel_press_frame: int = -1     # LMB押下開始フレーム (-1=非押下)
+        self._reel_clicks: list = []         # 直近クリックのフレーム番号
+        self._creep_frames: int = 0          # チョイ巻き残フレーム
+        self._fast_frames: int = 0           # 早巻き残フレーム
+
+        # バイト/フッキング
+        self._bite_mode: str = ""            # HOOKSET_* (バイト発生時に確定)
+        self._bite_type: str = ""            # BITE_* (演出種別)
+        self._bite_elapsed: int = 0          # バイトキューからの経過フレーム
+        self._weight_on_frame: int = 0       # VISUAL_DELAY: 重みが乗るフレーム
+        # イベント駆動バイト用トラッキング
+        self._prev_lure_cell: Tuple[int, int] = (-1, -1)
+        self._was_in_range: bool = False
+        self._bite_event_cd: int = 0         # イベント発火クールダウン残f
+
+        # ファイト
+        self.fight: Optional[FightState] = None
+        # フッキング地点 (画面座標) と開始距離 — ファイト描画の基準
+        self._fight_hook_sx: int = MAIN_W // 2
+        self._fight_hook_sy: int = (WATER_Y0 + WATER_NEAR_Y) // 2
+        self._fight_start_dist: float = 10.0
+        self._fight_fish: Optional[Fish] = None
+        self._fight_events: list = []        # (msg, timer) フラッシュ表示
+        self._result_lost_reason: str = ""
+
+        # Pressure grid (runtime, not saved)
+        self._pressure = [[0] * UW_SIZE for _ in range(UW_SIZE)]
+
+        # Debug
+        self.debug_mode = False
+
+        # Fonts / surfaces (init_fonts() sets these)
+        self.font: Optional[pygame.font.Font] = None
+        self.font_lg: Optional[pygame.font.Font] = None
+        self.font_sm: Optional[pygame.font.Font] = None
+        self._terrain_surf: Optional[pygame.Surface] = None
+        self._score_surf:   Optional[pygame.Surface] = None
+        self._struct_surf:  Optional[pygame.Surface] = None  # フィールド内ストラクチャー
+        self._gauge_surf:   Optional[pygame.Surface] = None  # テンションゲージ(細グラデ)
+
+        # V5: 軽量水面パーティクル (波紋/スプラッシュ/しぶき)
+        self._particles: list = []
+
+    # ── Lifecycle ──────────────────────────────────────────────────────
+
+    def init_fonts(self) -> None:
+        self.font    = pygame.font.Font(None, 28)
+        self.font_lg = pygame.font.Font(None, 80)
+        self.font_sm = pygame.font.Font(None, 22)
+        self._build_terrain_surf()
+        self._build_score_surf()
+        self._build_field_struct_surf()
+        self._build_gauge_surf()
+
+    def _build_terrain_surf(self) -> None:
+        surf = pygame.Surface((UW_SIZE * CELL_PX, UW_SIZE * CELL_PX))
+        for cy in range(UW_SIZE):
+            for cx in range(UW_SIZE):
+                cell = self.uw_map.cell(cx, cy)
+                if cell.terrain == TERRAIN_ROCK:
+                    color = C_ROCK_CELL
+                elif cell.cover:
+                    color = C_COVER_CELL
+                elif cell.weed:
+                    color = C_WEED_CELL
+                elif cell.terrain == TERRAIN_BREAK:
+                    color = C_BREAK_CELL
+                else:
+                    d = min(1.0, cell.depth / 3.5)
+                    color = (int(20 + d*30), int(60 + d*60), int(140 + d*60))
+                pygame.draw.rect(surf, color,
+                                 (cx*CELL_PX, cy*CELL_PX, CELL_PX-1, CELL_PX-1))
+        self._terrain_surf = surf
+
+    def _build_score_surf(self) -> None:
+        surf = pygame.Surface((UW_SIZE * CELL_PX, UW_SIZE * CELL_PX))
+        for cy in range(UW_SIZE):
+            for cx in range(UW_SIZE):
+                color = _score_to_heat(self.uw_map.full_score(cx, cy))
+                pygame.draw.rect(surf, color,
+                                 (cx*CELL_PX, cy*CELL_PX, CELL_PX-1, CELL_PX-1))
+        self._score_surf = surf
+
+    # ゲージ幅 (パネル幅 PW=700 - 余白)。_build_gauge_surf と描画で共有
+    _GAUGE_W = 672
+    _GAUGE_H = 12
+
+    def _build_gauge_surf(self) -> None:
+        """テンションゲージの細い横長グラデーションを事前生成 (青→緑→黄→赤)。
+
+        mockup v002 準拠。色は zone 境界 (T_BLUE/T_GREEN/T_YELLOW) を
+        アンカーに滑らかに補間する。補助情報なので主張は控えめ。
+        """
+        W, H = self._GAUGE_W, self._GAUGE_H
+        surf = pygame.Surface((W, H))
+        # (位置, RGB) のアンカー。位置は 0..1
+        stops = [
+            (0.00, (40,  90, 200)),   # SLACK 濃い青
+            (T_BLUE, (60, 130, 220)),  # 青
+            ((T_BLUE + T_GREEN) / 2, (50, 180, 90)),   # SAFE 緑
+            (T_GREEN, (120, 200, 60)),
+            (T_YELLOW, (235, 200, 50)),  # 黄
+            (0.92, (220, 70, 45)),    # DANGER 赤
+            (1.00, (180, 40, 30)),
+        ]
+        def lerp(a, b, t):
+            return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+        for x in range(W):
+            v = x / (W - 1)
+            for i in range(len(stops) - 1):
+                p0, c0 = stops[i]
+                p1, c1 = stops[i + 1]
+                if p0 <= v <= p1:
+                    tt = (v - p0) / (p1 - p0) if p1 > p0 else 0.0
+                    col = lerp(c0, c1, tt)
+                    break
+            else:
+                col = stops[-1][1]
+            pygame.draw.line(surf, col, (x, 0), (x, H))
+        self._gauge_surf = surf
+
+    def _build_field_struct_surf(self) -> None:
+        """釣りビュー内のストラクチャー描画 (常時表示) を事前生成する。
+
+        水中: ウィード/カバー/ロック/ブレイクのセルを半透明の色味で水面に投影。
+        水上: ウィードの穂先・カバーの立ち木/杭・水面を割るロックを
+              セル位置から上方向へ描き込む (奥ほど小さく = 簡易パース)。
+        """
+        surf = pygame.Surface((MAIN_W, SCREEN_H), pygame.SRCALPHA)
+
+        for cy in range(UW_SIZE):
+            scale = 0.35 + 0.65 * (cy / (UW_SIZE - 1))   # 奥=小さく 手前=大きく
+            for cx in range(UW_SIZE):
+                cell = self.uw_map.cell(cx, cy)
+                sx, sy = self._uw_to_screen(cx, cy)
+                x0, y0 = self._uw_to_screen(cx - 0.5, cy - 0.5)
+                x1, y1 = self._uw_to_screen(cx + 0.5, cy + 0.5)
+                w, h = max(2, x1 - x0), max(2, y1 - y0)
+                j = (cx * 73 + cy * 131) % 7   # セル固有の揺らぎ
+
+                if cell.terrain == TERRAIN_ROCK:
+                    # 水中の岩影 + 水面を割る岩頭
+                    pygame.draw.ellipse(surf, (95, 95, 105, 70), (x0, y0, w, h))
+                    rw = int((6 + j) * scale)
+                    rh = int((4 + j // 2) * scale)
+                    if rw >= 2 and rh >= 2:
+                        pygame.draw.ellipse(
+                            surf, (110, 110, 120, 230),
+                            (sx - rw, sy - rh, rw * 2, rh + 2))
+                        pygame.draw.ellipse(
+                            surf, (200, 215, 230, 90),
+                            (sx - rw - 3, sy - 2, rw * 2 + 6, 4), 1)
+                elif cell.cover:
+                    # 水中のカバー影 + 立ち木/杭
+                    pygame.draw.ellipse(surf, (110, 75, 35, 75), (x0, y0, w, h))
+                    th = int((16 + j * 3) * scale)
+                    tw = max(1, int(3 * scale))
+                    tx = sx + (j - 3) * 2
+                    pygame.draw.line(surf, (85, 58, 30, 235),
+                                     (tx, sy + 2), (tx, sy - th), tw)
+                    pygame.draw.line(surf, (85, 58, 30, 200),
+                                     (tx, sy - th + 4),
+                                     (tx + int(6 * scale) * (1 if j % 2 else -1),
+                                      sy - th), max(1, tw - 1))
+                elif cell.weed:
+                    # 水中のウィード + 水面に出る穂先
+                    pygame.draw.ellipse(surf, (40, 110, 55, 80), (x0, y0, w, h))
+                    for k in range(2 + j % 2):
+                        gx = sx + (k * 5 - 4) + (j % 3)
+                        gh = int((7 + (j + k * 2) % 6) * scale)
+                        pygame.draw.line(surf, (55, 130, 60, 220),
+                                         (gx, sy + 1), (gx + 1, sy - gh), 1)
+                elif cell.terrain == TERRAIN_BREAK:
+                    # ブレイク: 水中のみ。色味を落とした帯で段差を示す
+                    pygame.draw.rect(surf, (15, 45, 95, 70), (x0, y0, w, h))
+                    pygame.draw.line(surf, (130, 170, 210, 60),
+                                     (x0, y1 - 1), (x1, y1 - 1), 1)
+
+        self._struct_surf = surf
+
+    def _spawn_fish(self, rng: random.Random) -> list:
+        """スポーン: <40cm は群集管理 (ランダム)、≥40cm は個体管理。"""
+        best    = self.uw_map.best_positions(10)
+        act_mod = self._env.activity_modifier if self._env else 1.0
+        fishes  = []
+
+        # ── 小型魚: 群集管理 (<40 cm) ────────────────────────────────
+        for i, sz in enumerate([22.0, 25.0, 27.0, 30.0, 32.0, 35.0, 38.0]):
+            pos = best[i % len(best)]
+            fx  = max(1.0, min(float(UW_SIZE - 2), pos[0] + rng.uniform(-2, 2)))
+            fy  = max(1.0, min(float(UW_SIZE - 2), pos[1] + rng.uniform(-2, 2)))
+            fish = Fish(fx, fy, sz, self.uw_map, rng)
+            fish.activity = max(0.20, min(1.0, fish.activity * act_mod))
+            fishes.append(fish)
+
+        # ── 大型魚: 個体管理 (≥40 cm) ────────────────────────────────
+        if self._population:
+            self._population.initialize_spot(self.spot_name)
+            individuals = self._population.get_spot_individuals(self.spot_name)
+            for j, fi in enumerate(individuals):
+                pos = best[(3 + j) % len(best)]   # 小型魚ポジションとずらす
+                fx  = max(1.0, min(float(UW_SIZE - 2), pos[0] + rng.uniform(-3, 3)))
+                fy  = max(1.0, min(float(UW_SIZE - 2), pos[1] + rng.uniform(-3, 3)))
+                fish = Fish(fx, fy, fi.length, self.uw_map, rng)
+                # aggression を activity ベースに使用; caution は spook 感度に反映済
+                fish.activity = max(0.20, min(1.0, fi.aggression * act_mod))
+                fish.fish_id  = fi.fish_id   # 個体ID紐付け
+                fishes.append(fish)
+        else:
+            # フォールバック: population 未接続時は固定サイズで生成
+            for i, sz in enumerate([40.0, 43.0, 45.0, 48.0]):
+                pos = best[(3 + i) % len(best)]
+                fx  = max(1.0, min(float(UW_SIZE - 2), pos[0] + rng.uniform(-2, 2)))
+                fy  = max(1.0, min(float(UW_SIZE - 2), pos[1] + rng.uniform(-2, 2)))
+                fish = Fish(fx, fy, sz, self.uw_map, rng)
+                fish.activity = max(0.20, min(1.0, fish.activity * act_mod))
+                fishes.append(fish)
+
+        # ── Beta v0.9: F4 テストモード — 高活性の50UPを追加スポーン ──
+        # fish_id なし = 個体管理外。学習・永続化に影響しない使い捨てテスト魚。
+        if self._test_big_fish:
+            for k, (sz, act) in enumerate(TU.TEST_BIG_FISH):
+                pos = best[k % len(best)]
+                fx  = max(1.0, min(float(UW_SIZE - 2), pos[0] + rng.uniform(-1.5, 1.5)))
+                fy  = max(1.0, min(float(UW_SIZE - 2), pos[1] + rng.uniform(-1.5, 1.5)))
+                fish = Fish(fx, fy, sz, self.uw_map, rng)
+                fish.activity = act
+                fishes.append(fish)
+
+        return fishes
+
+    # ── Lure switching ────────────────────────────────────────────────
+
+    def _switch_lure(self, idx: int) -> None:
+        """Switch to lure at *idx*.  Resets lure if currently in water."""
+        if idx == self._lure_idx:
+            return
+        self._lure_idx = idx
+        spec = get_spec_by_idx(idx)
+        # Preserve in_water=False; if lure was in water, retract it
+        self.lure.reset()
+        self.lure.lure_type = spec.name
+        if self.state == FS_RETRIEVE:
+            self.state = FS_IDLE
+            self._intended_pos = None
+            self._bite_charge  = 0.0
+
+    # ── Events ─────────────────────────────────────────────────────────
+
+    def handle_event(self, event: pygame.event.Event) -> Optional[str]:
+        # ── マウス押下 ────────────────────────────────────────────────
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if self.state == FS_IDLE:
+                # キャスト溜め開始 (狙い点は十字キーで動かしたキャストカーソル)
+                iux = int(round(self.cast_cursor_x))
+                iuy = int(round(self.cast_cursor_y))
+                self._cast_aim    = (iux, iuy)
+                self._cast_charge = 0.0
+                self._cast_dir    = 1
+                self.state = FS_CAST_CHARGE
+            elif self.state == FS_RETRIEVE:
+                # リール: 押下開始記録 + 連打検出
+                self._reel_press_frame = self._frame_count
+                self._reel_clicks.append(self._frame_count)
+                self._reel_clicks = [
+                    f for f in self._reel_clicks
+                    if self._frame_count - f <= REEL_FAST_WINDOW
+                ]
+                if len(self._reel_clicks) >= REEL_FAST_CLICKS:
+                    self._fast_frames = REEL_FAST_FRAMES
+                self.rod.notify_reel()
+
+        # ── マウスリリース ────────────────────────────────────────────
+        if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+            if self.state == FS_CAST_CHARGE:
+                self._release_cast()
+            elif self.state == FS_RETRIEVE:
+                # 短押し → チョイ巻き
+                if (self._reel_press_frame >= 0
+                        and self._frame_count - self._reel_press_frame
+                        <= REEL_TAP_FRAMES):
+                    self._creep_frames = REEL_CREEP_FRAMES
+                self._reel_press_frame = -1
+
+        # ── キー入力 ──────────────────────────────────────────────────
+        if event.type == pygame.KEYDOWN:
+            if self.state == FS_BITE and event.key in (pygame.K_DOWN, pygame.K_SPACE):
+                # ↓ = フッキング (SPACE は補助として残す)
+                self._attempt_hookset()
+            elif event.key == pygame.K_k and self.state == FS_KEEP_RELEASE:
+                self._keep_fish()
+            elif event.key == pygame.K_r and self.state == FS_KEEP_RELEASE:
+                self._release_fish()
+            elif event.key == pygame.K_F2:
+                # 水中デバッグ表示トグル (旧 D キー; A/D 足場移動と衝突のため移設)
+                self.debug_mode = not self.debug_mode
+            elif event.key == pygame.K_ESCAPE:
+                if self.state == FS_FIGHT:
+                    # ファイト中のESC = ギブアップ (バラシ扱い)
+                    self._lose_fight(OUTCOME_HOOKOUT, give_up=True)
+                    return None
+                self.rod.reset()   # 釣りビューを抜ける時: ロッドを中立へ戻す
+                return "exit_fishing"
+            elif self.state in (FS_IDLE, FS_RETRIEVE):
+                # Keys 1-6: switch lure type (溜め/バイト/ファイト中は不可)
+                lure_key_map = {
+                    pygame.K_1: 0,
+                    pygame.K_2: 1,
+                    pygame.K_3: 2,
+                    pygame.K_4: 3,
+                    pygame.K_5: 4,
+                    pygame.K_6: 5,
+                }
+                if event.key in lure_key_map:
+                    self._switch_lure(lure_key_map[event.key])
+
+        return None
+
+    # ── Update ─────────────────────────────────────────────────────────
+
+    # ── V5: 軽量水面パーティクル ──────────────────────────────────────
+
+    _PARTICLE_CAP = 60   # 同時上限 (60FPS維持のため少なめ)
+
+    def _spawn_ripple(self, sx: int, sy: int, rings: int = 2) -> None:
+        """着水/重み乗り: 同心円が広がる波紋。"""
+        for k in range(rings):
+            if len(self._particles) >= self._PARTICLE_CAP:
+                break
+            self._particles.append({
+                "kind": "ripple", "x": sx, "y": sy,
+                "life": 0, "max": 26 + k * 6, "delay": k * 6,
+            })
+
+    def _spawn_splash(self, sx: int, sy: int, n: int = 8,
+                      power: float = 1.0) -> None:
+        """トップバイト/フッキング: 上方向へ飛ぶ水しぶき (重力で落ちる)。"""
+        for _ in range(n):
+            if len(self._particles) >= self._PARTICLE_CAP:
+                break
+            ang = random.uniform(-2.5, -0.65)   # 主に上向き
+            spd = random.uniform(2.2, 5.0) * power
+            self._particles.append({
+                "kind": "drop", "x": float(sx), "y": float(sy),
+                "vx": math.cos(ang) * spd, "vy": math.sin(ang) * spd,
+                "life": 0, "max": random.randint(16, 30),
+                "r": random.randint(2, 3),
+            })
+        self._spawn_ripple(sx, sy, rings=1)
+
+    def _update_particles(self) -> None:
+        alive = []
+        for p in self._particles:
+            p["life"] += 1
+            if p["life"] >= p["max"]:
+                continue
+            if p["kind"] == "drop":
+                p["x"] += p["vx"]
+                p["y"] += p["vy"]
+                p["vy"] += 0.45   # 重力
+            alive.append(p)
+        self._particles = alive
+
+    def _draw_particles(self, surface: pygame.Surface) -> None:
+        if not self._particles:
+            return
+        ov = pygame.Surface((MAIN_W, SCREEN_H), pygame.SRCALPHA)
+        for p in self._particles:
+            if p["life"] < p.get("delay", 0):
+                continue
+            prog = p["life"] / p["max"]
+            a = int(220 * (1.0 - prog))
+            if p["kind"] == "ripple":
+                r = int(4 + prog * 26)
+                pygame.draw.circle(ov, (220, 235, 255, max(0, a)),
+                                   (int(p["x"]), int(p["y"])), r, 2)
+            else:  # drop
+                pygame.draw.circle(ov, (235, 245, 255, max(0, a)),
+                                   (int(p["x"]), int(p["y"])), p["r"])
+        surface.blit(ov, (0, 0))
+
+    def update(self) -> None:
+        self._frame_count += 1
+        self._update_particles()
+        if self._splash_timer > 0:
+            self._splash_timer -= 1
+        if self._intended_timer > 0:
+            self._intended_timer -= 1
+        if self._cast_quality_timer > 0:
+            self._cast_quality_timer -= 1
+        # ファイトイベントフラッシュのタイマー
+        self._fight_events = [
+            (msg, t - 1) for msg, t in self._fight_events if t > 1
+        ]
+
+        if self.state == FS_CAST_CHARGE:
+            # キャストゲージ: 0→100→0 を往復 (ピンポン式、自動リリースなし)
+            self._cast_charge += CAST_CHARGE_RATE * self._cast_dir
+            if self._cast_charge >= CAST_CHARGE_MAX:
+                self._cast_charge = CAST_CHARGE_MAX
+                self._cast_dir = -1
+            elif self._cast_charge <= 0.0:
+                self._cast_charge = 0.0
+                self._cast_dir = 1
+            for fish in self.fishes:
+                if fish.state not in (FISH_CAUGHT, REACT_BITE):
+                    fish.update(None)
+
+        elif self.state == FS_CASTING:
+            self._update_casting()
+
+        elif self.state == FS_RETRIEVE:
+            self._update_retrieve()
+
+        elif self.state == FS_BITE:
+            self._bite_elapsed += 1
+            for fish in self.fishes:
+                if fish.state not in (FISH_CAUGHT, REACT_BITE):
+                    fish.update(self.lure)
+            # モード別タイムアウト
+            if self._bite_mode == HOOKSET_VISUAL_DELAY:
+                if self._bite_elapsed > self._weight_on_frame + TU.TOPWATER_TIMEOUT_AFTER:
+                    self._miss_bite()
+            elif self._bite_elapsed > _BITE_TIMEOUT.get(self._bite_mode, BITE_FRAMES):
+                self._miss_bite()
+
+        elif self.state == FS_FIGHT:
+            self._update_fight()
+
+        elif self.state == FS_KEEP_RELEASE:
+            # Phase 10: waiting for K/R key — non-caught fish keep patrolling
+            for fish in self.fishes:
+                if fish.state not in (FISH_CAUGHT, REACT_BITE):
+                    fish.update(None)
+
+        elif self.state == FS_RESULT:
+            self._result_timer -= 1
+            if self._result_timer <= 0:
+                # Fish handling already done in _keep_fish() / _release_fish()
+                self._result_fish = None
+                self.rod.reset()   # FS_IDLE復帰時: 前回ファイトのロッド角を確実に消す
+                self.state        = FS_IDLE
+                self._bite_charge = 0.0
+
+        else:  # FS_IDLE
+            self._update_idle()
+
+    def _update_idle(self) -> None:
+        """キャスト前: A/D=足場移動, 十字キー=キャストカーソル移動。"""
+        keys = pygame.key.get_pressed()
+
+        # ── 足場移動 (A/D)。キャスト前のみ。立ち位置でアプローチ角が決まる ──
+        move = (1 if keys[pygame.K_d] else 0) - (1 if keys[pygame.K_a] else 0)
+        if move != 0:
+            self.player_stance_x = max(
+                TU.STANCE_MIN,
+                min(TU.STANCE_MAX,
+                    self.player_stance_x + move * TU.STANCE_MOVE_SPEED))
+
+        # ── キャストカーソル移動 (十字キー) ──
+        cdx = (1 if keys[pygame.K_RIGHT] else 0) - (1 if keys[pygame.K_LEFT] else 0)
+        cdy = (1 if keys[pygame.K_DOWN] else 0) - (1 if keys[pygame.K_UP] else 0)
+        if cdx or cdy:
+            self.cast_cursor_x = max(0.0, min(float(UW_SIZE - 1),
+                self.cast_cursor_x + cdx * TU.CAST_CURSOR_SPEED))
+            self.cast_cursor_y = max(0.0, min(float(UW_SIZE - 1),
+                self.cast_cursor_y + cdy * TU.CAST_CURSOR_SPEED))
+
+        for fish in self.fishes:
+            if fish.state not in (FISH_CAUGHT, REACT_BITE):
+                fish.update(None)
+
+    def _lure_match(self) -> float:
+        """Return match score [0.10, 1.00] for current lure vs environment/terrain.
+
+        Used as a bite-charge multiplier and displayed in the HUD.
+        """
+        spec = get_spec_by_idx(self._lure_idx)
+        score = 0.50  # neutral baseline
+
+        # ── Action bonus ──────────────────────────────────────────────
+        if self.lure.in_water and self.lure.action in spec.best_actions:
+            score += 0.15
+
+        # ── Environment conditions ────────────────────────────────────
+        if self._env:
+            gm = self._env._last_game_minutes
+            if gm >= 0:
+                hour = (gm % 1440) // 60
+            else:
+                hour = 6  # default morning if env not yet ticked
+            weather    = self._env.weather
+            wind_speed = self._env.wind_speed
+            act_mod    = self._env.activity_modifier
+
+            for cond in spec.best_conditions:
+                if   cond == "morning"      and 4  <= hour < 8:          score += 0.12
+                elif cond == "evening"      and 17 <= hour < 21:         score += 0.12
+                elif cond == "cloudy"       and weather == "Cloudy":     score += 0.10
+                elif cond == "rain"         and weather in ("Rain", "Heavy Rain"): score += 0.10
+                elif cond == "clear"        and weather == "Sunny":      score += 0.08
+                elif cond == "wind"         and wind_speed > 4.0:        score += 0.12
+                elif cond == "low_activity" and act_mod < 0.65:          score += 0.15
+                elif cond == "pressure":
+                    if self.lure.in_water:
+                        lx = int(self.lure.x); ly = int(self.lure.y)
+                        if 0 <= lx < UW_SIZE and 0 <= ly < UW_SIZE:
+                            if self._pressure[ly][lx] >= 5:
+                                score += 0.12
+
+        # ── Terrain match ─────────────────────────────────────────────
+        if self.lure.in_water:
+            lx = int(self.lure.x); ly = int(self.lure.y)
+            if 0 <= lx < UW_SIZE and 0 <= ly < UW_SIZE:
+                cell = self.uw_map.cell(lx, ly)
+                for terrain in spec.best_terrain:
+                    if   terrain == "weed"    and cell.weed:                          score += 0.10
+                    elif terrain == "cover"   and cell.cover:                         score += 0.10
+                    elif terrain == "break"   and cell.terrain == TERRAIN_BREAK:      score += 0.10
+                    elif terrain == "rock"    and cell.terrain == TERRAIN_ROCK:       score += 0.10
+                    elif terrain == "shallow" and cell.depth < 1.0:                   score += 0.08
+
+        return round(min(1.00, max(0.10, score)), 2)
+
+    def _update_retrieve(self) -> None:
+        """Per-frame logic when lure is in water."""
+        # ── Beta v0.9: 十字キー=ロッド / マウス=リール ────────────────
+        keys  = pygame.key.get_pressed()
+        mouse = pygame.mouse.get_pressed()
+        self.rod.update(keys)
+        if self._creep_frames > 0:
+            self._creep_frames -= 1
+        if self._fast_frames > 0:
+            self._fast_frames -= 1
+
+        action, mult = self._determine_action(mouse)
+        self.lure.retrieve_mult = mult
+        self.lure.steer_x = self.rod.steer_x
+        # リトリーブは立ち位置基準の自然なラインへ寄せる (急吸収しない)
+        self.lure.retrieve_target_x = self._retrieve_target_cell_x()
+        self.lure.set_action(action)
+        reached = self.lure.update()
+        if reached:
+            self.state       = FS_IDLE
+            self._intended_pos = None
+            self._bite_charge = 0.0
+            return
+
+        # ── Pressure tracking ──
+        lx, ly = int(self.lure.x), int(self.lure.y)
+        if 0 <= lx < UW_SIZE and 0 <= ly < UW_SIZE:
+            if self._frame_count % 18 == 0:
+                self._pressure[ly][lx] = min(15, self._pressure[ly][lx] + 1)
+
+        # ── Fish AI ──
+        lure_score   = self._lure_spot_score()
+        any_in_range = False
+        in_range_fish = None
+
+        # Phase 9: APPROACH → SPOOK 学習検出のため更新前の状態を記録
+        prev_states = {
+            id(f): f.state
+            for f in self.fishes
+            if f.fish_id and f.state not in (FISH_CAUGHT, REACT_BITE)
+        }
+
+        for fish in self.fishes:
+            if fish.state in (FISH_CAUGHT, REACT_BITE):
+                continue
+            visible = self._visible_lure_for(fish, lure_score)
+            fx, fy  = int(fish.x), int(fish.y)
+            pressure = (
+                self._pressure[fy][fx]
+                if 0 <= fx < UW_SIZE and 0 <= fy < UW_SIZE
+                else 0
+            )
+            result = fish.update(visible, cell_pressure=pressure)
+            if result == "in_range":
+                any_in_range = True
+                if in_range_fish is None:
+                    in_range_fish = fish
+
+        # Phase 9: 見切り (APPROACH → SPOOK) 学習
+        for fish in self.fishes:
+            if not fish.fish_id:
+                continue
+            prev = prev_states.get(id(fish))
+            if prev == REACT_APPROACH and fish.state == REACT_SPOOK:
+                fi = self._get_individual(fish)
+                if fi:
+                    fi.learn(
+                        "spook",
+                        self._current_lure_category(),
+                        self._current_game_day(),
+                    )
+
+        # ── イベント駆動バイト ──
+        # 魚が射程内に「いるだけ」では食わない。実釣的な「触る/吸う/弾く」瞬間
+        # (停止・フォール開始・ロッドアクション直後・ストラクチャ通過・追いついた瞬間)
+        # に bite_check を走らせる。近接ゲージは弱い保険に降格。
+        if self._bite_event_cd > 0:
+            self._bite_event_cd -= 1
+
+        if any_in_range:
+            act_mod   = self._env.activity_modifier if self._env else 1.0
+            lure_mod  = self._lure_match()
+            mem_mod   = self._memory_modifier_for(in_range_fish) if in_range_fish else 1.0
+            cast_mod  = (
+                TU.CAST_PERFECT_BIG_FISH_MULT
+                if (self._cast_quality == CAST_PERFECT
+                    and in_range_fish and in_range_fish.size >= 40.0)
+                else 1.0
+            )
+            modifier = act_mod * lure_mod * mem_mod * cast_mod
+
+            # ── トリガーイベント検出 ──
+            event = None
+            if self.lure.action_changed:
+                if self.lure.action == ACTION_STOP:
+                    event = "stop"
+                elif self.lure.action == ACTION_FALL:
+                    event = "fall"
+                elif self.lure.action in (ACTION_TWITCH, ACTION_LIFT):
+                    event = "rod"
+            if event is None:
+                # ストラクチャ通過直後 (新しいセルに入り、そこが地形)
+                if (lx, ly) != self._prev_lure_cell and 0 <= lx < UW_SIZE and 0 <= ly < UW_SIZE:
+                    cell = self.uw_map.cell(lx, ly)
+                    if cell.weed or cell.cover or cell.terrain in (
+                            TERRAIN_ROCK, TERRAIN_BREAK):
+                        event = "structure"
+            if event is None and not self._was_in_range:
+                # 魚がルアーに追いついた瞬間 (リアクションバイト)
+                event = "reach"
+
+            # ── bite_check (イベント時に1回だけ確率判定) ──
+            if event is not None and self._bite_event_cd <= 0:
+                w = TU.BITE_EVENT_WEIGHTS.get(event, 1.0)
+                prob = min(0.95, TU.BITE_EVENT_BASE_P * w * modifier)
+                self._bite_event_cd = TU.BITE_EVENT_COOLDOWN
+                if random.random() < prob:
+                    self._trigger_bite()
+                    self._prev_lure_cell = (lx, ly)
+                    self._was_in_range = True
+                    return
+
+            # 弱い近接ゲージ (保険): 何もイベントが無くてもごく稀に食う
+            base_rate = _CHARGE_RATE.get(self.lure.action, 0.005)
+            self._bite_charge = min(
+                1.0,
+                self._bite_charge
+                + base_rate * modifier * TU.BITE_PASSIVE_SCALE,
+            )
+            if self._bite_charge >= BITE_TRIGGER:
+                self._trigger_bite()
+        else:
+            self._bite_charge = max(0.0, self._bite_charge - TU.BITE_CHARGE_DECAY)
+
+        self._prev_lure_cell = (lx, ly)
+        self._was_in_range = any_in_range
+
+    def _determine_action(self, mouse) -> Tuple[str, float]:
+        """Beta v0.9: (action, retrieve_mult) を返す。
+
+        リール (マウス):
+          長押し       → 通常巻き (×1.0)
+          短押しタップ → チョイ巻き (×0.45)
+          連打         → 早巻き (×1.8)
+        ロッド (十字キー):
+          ↓短押し=トゥイッチ  ↓長押し=リフト  ↑=フォール
+          中立 (操作直後) = ストップ
+        """
+        # リール長押し (タップ猶予より長く押している)
+        reel_hold = (
+            mouse[0]
+            and self._reel_press_frame >= 0
+            and self._frame_count - self._reel_press_frame > REEL_TAP_FRAMES
+        )
+        if reel_hold:
+            self.rod.notify_reel()
+            mult = TU.REEL_FAST_MULT if self._fast_frames > 0 else 1.0
+            return ACTION_RETRIEVE, mult
+        if self._creep_frames > 0:
+            return ACTION_RETRIEVE, TU.REEL_CREEP_MULT
+        return self.rod.lure_action(), 1.0
+
+    # ── Beta v0.9: Cast release ───────────────────────────────────────
+
+    def _judge_cast(self) -> str:
+        # ピンポン式: 値のみで判定 (LATE はゲージ上限廃止に伴い発生しない)
+        c = self._cast_charge
+        if CAST_PERFECT_LO <= c <= CAST_PERFECT_HI:
+            return CAST_PERFECT
+        if c >= CAST_GOOD_LO:
+            return CAST_GOOD
+        return CAST_EARLY
+
+    def _release_cast(self) -> None:
+        """LMBリリース: ゲージ判定 → 着水点決定 → キャスト。"""
+        if self._cast_aim is None:
+            self.state = FS_IDLE
+            return
+        quality = self._judge_cast()
+        iux, iuy = self._cast_aim
+
+        # 着水点 = 狙い点 + 品質補正
+        ax, ay = float(iux), float(iuy)
+        if quality == CAST_EARLY:
+            # ショートキャスト: ゲージ不足分だけプレイヤー側 (y+) へずれる
+            shortfall = (CAST_GOOD_LO - self._cast_charge) / CAST_GOOD_LO
+            ay += (float(UW_SIZE - 1) - ay) * min(
+                TU.CAST_EARLY_SHORTFALL_CAP,
+                shortfall * TU.CAST_EARLY_SHORTFALL_FACTOR,
+            )
+        elif quality == CAST_LATE:
+            # オーバーキャスト: 対岸側 (y-) へずれる
+            ay -= random.uniform(*TU.CAST_LATE_OVERSHOOT)
+
+        sigma, clamp = _CAST_DEVIATION[quality]
+        dx = min(clamp, max(-clamp, random.gauss(0, sigma)))
+        dy = min(clamp, max(-clamp, random.gauss(0, sigma)))
+        fx = max(0, min(UW_SIZE - 1, int(round(ax + dx))))
+        fy = max(0, min(UW_SIZE - 1, int(round(ay + dy))))
+
+        self._intended_pos    = (iux, iuy)
+        self._intended_timer  = INTENDED_FRAMES
+        self._cast_quality    = quality
+        self._cast_quality_timer = 90
+        self._cast_aim        = None
+        self.rod.reset()
+        self._bite_charge   = 0.0
+
+        # ── キャスト飛行演出を開始 (FS_CASTING) ──────────────────────
+        # 着水点へ即出現させず、手元(ロッドティップ付近)から放物線で飛ばす。
+        # ルアーはまだ in_water=False。飛行完了時に lure.cast(fx,fy) を呼ぶ。
+        tip = self.rod.tip_pos(self.rod_anchor, length=TU.ROD_VISUAL_LENGTH)
+        tgt = self._uw_to_screen(fx, fy)
+        self._cast_flight_start  = (float(tip[0]), float(tip[1]))
+        self._cast_flight_target = (float(tgt[0]), float(tgt[1]))
+        self._cast_flight_cell   = (int(fx), int(fy))
+        dist_px = math.hypot(tgt[0] - tip[0], tgt[1] - tip[1])
+        # 飛行時間: 距離に応じて 20〜45 frame
+        self._cast_flight_duration = int(max(20, min(45, 20 + dist_px * 0.045)))
+        self._cast_flight_timer = 0
+        # 放物線の高さ: 遠投ほど高く弧を描く
+        self._cast_arc_height = min(170.0, 60.0 + dist_px * 0.30)
+        self._cast_flight_trail = []
+        self.state = FS_CASTING
+
+    # ── v0.95: Cast flight (ルアーが飛んでいく演出) ──────────────────
+
+    def _cast_flight_pos(self, t: float) -> Tuple[float, float]:
+        """飛行進捗 t(0..1) における画面座標 (放物線)。"""
+        sx, sy = self._cast_flight_start
+        tx, ty = self._cast_flight_target
+        x = sx + (tx - sx) * t
+        y = sy + (ty - sy) * t
+        # 上方向の弧 (sin で離陸→着水)
+        y -= self._cast_arc_height * math.sin(math.pi * t)
+        return (x, y)
+
+    def _update_casting(self) -> None:
+        """ルアー飛行中: 着水点へ放物線で飛び、完了で FS_RETRIEVE へ。"""
+        self._cast_flight_timer += 1
+        t = min(1.0, self._cast_flight_timer / max(1, self._cast_flight_duration))
+        # 軌跡 (薄いライン用)。直近のみ保持
+        self._cast_flight_trail.append(self._cast_flight_pos(t))
+        if len(self._cast_flight_trail) > 12:
+            self._cast_flight_trail.pop(0)
+
+        # 飛行中も魚はパトロール (まだルアーは水中にない)
+        for fish in self.fishes:
+            if fish.state not in (FISH_CAUGHT, REACT_BITE):
+                fish.update(None)
+
+        if t >= 1.0:
+            # 着水: ここで初めてルアーを水中へ
+            fx, fy = self._cast_flight_cell
+            self.lure.cast(fx, fy)
+            self._splash_timer = 24
+            csx, csy = self._uw_to_screen(fx, fy)
+            self._spawn_ripple(csx, csy, rings=2)
+            # イベント駆動バイトのトラッキングをリセット
+            self._prev_lure_cell = (int(fx), int(fy))
+            self._was_in_range   = False
+            self._bite_event_cd  = 0
+            self._cast_flight_trail = []
+            self.state = FS_RETRIEVE
+
+    # ── Bite / hookset / miss ─────────────────────────────────────────
+
+    def _trigger_bite(self) -> None:
+        """バイト発生: ルアー別フッキング方式に応じて分岐。"""
+        biting = min(
+            (f for f in self.fishes if f.state == REACT_CHASE),
+            key=lambda f: (f.x - self.lure.x)**2 + (f.y - self.lure.y)**2,
+            default=None,
+        )
+        if not biting:
+            return
+
+        biting.trigger_bite()
+        self._bite_charge = 0.0
+        # ルアーは水中に残す: ラインが張られたままティップが引き込まれる
+        # (リトリーブ→バイトをシームレスに見せる)
+        self._intended_pos = None
+
+        spec = get_spec_by_idx(self._lure_idx)
+        self._bite_mode = _HOOKSET_MODE.get(spec.name, HOOKSET_DELAY)
+        self._bite_type = _BITE_TYPE.get(spec.name, BITE_MEDIUM_TICK)
+        self._bite_elapsed = 0
+
+        # 自動フッキングは廃止: どのルアーも↓入力で合わせなければ釣れない
+        bsx, bsy = self._uw_to_screen(biting.x, biting.y)
+        if self._bite_mode == HOOKSET_VISUAL_DELAY:
+            # バシャ! → 重みが乗るまで待つ。トップは派手なスプラッシュ
+            self._weight_on_frame = random.randint(*TU.TOPWATER_WEIGHT_ON_RANGE)
+            self._spawn_splash(bsx, bsy, n=12, power=1.3)
+        else:
+            # 水中バイト: 控えめな波紋
+            self._spawn_ripple(bsx, bsy, rings=1)
+
+        self.state = FS_BITE
+
+    def _hookset_quality(self) -> Optional[str]:
+        """↓入力タイミングからフック品質を返す (None = すっぽ抜け)。
+
+        タイミング窓は tuning.py の DELAY_* / TOPWATER_* / HYBRID_* で調整。
+        """
+        t = self._bite_elapsed
+        if self._bite_mode == HOOKSET_DELAY:
+            # 一呼吸置くのが正解
+            if t < TU.DELAY_POOR_END:
+                return "POOR"
+            if t < TU.DELAY_GOOD1_END:
+                return "GOOD"
+            if t < TU.DELAY_JUST_END:
+                return "JUST"
+            if t < TU.DELAY_GOOD2_END:
+                return "GOOD"
+            return "NORMAL"
+        if self._bite_mode == HOOKSET_VISUAL_DELAY:
+            # 重みが乗る前に合わせるとすっぽ抜けやすい
+            if t < self._weight_on_frame:
+                return (None if random.random() < TU.TOPWATER_EARLY_MISS_P
+                        else "POOR")
+            dt = t - self._weight_on_frame
+            if dt < TU.TOPWATER_JUST_END:
+                return "JUST"
+            if dt < TU.TOPWATER_GOOD_END:
+                return "GOOD"
+            return "NORMAL"
+        if self._bite_mode == HOOKSET_AUTO:
+            # クランク/スピナベ: ゴン!と来たら即合わせが正解 (窓は広め)
+            if t < TU.AUTO_JUST_END:
+                return "JUST"
+            if t < TU.AUTO_GOOD_END:
+                return "GOOD"
+            return "NORMAL"
+        # HYBRID (手動分岐)
+        if t < TU.HYBRID_GOOD_END:
+            return "GOOD"
+        if t < TU.HYBRID_JUST_END:
+            return "JUST"
+        return "NORMAL"
+
+    def _attempt_hookset(self) -> None:
+        quality = self._hookset_quality()
+        if quality is None:
+            # すっぽ抜け
+            self._fight_events.append(("MISSED!", 60))
+            self._miss_bite()
+            return
+        self._do_hookset(quality)
+
+    def _do_hookset(self, quality: str) -> None:
+        """フッキング成立。50cm以上はファイトへ、それ未満は即キャッチ。"""
+        # フッキング地点 (=ルアー位置) をリセット前に記録 → ファイト描画の基準
+        hook_sx, hook_sy = self._uw_to_screen(self.lure.x, self.lure.y)
+        # V5: フッキング成功の水しぶき
+        self._spawn_splash(hook_sx, hook_sy, n=10, power=1.1)
+        self.lure.reset()   # ここでルアー回収 (バイト中は水中に残している)
+        caught = next((f for f in self.fishes if f.state == REACT_BITE), None)
+        if not caught:
+            self.state         = FS_RESULT
+            self._result_timer = RESULT_FRAMES
+            return
+
+        caught.size = round(caught.size + random.uniform(-1.5, 1.5), 1)
+        self._result_fish    = caught
+        self._result_size    = caught.size
+        self._result_fish_id = caught.fish_id or ""
+
+        if caught.size >= FIGHT_MIN_SIZE:
+            # ── ファイト開始 ─────────────────────────────────────────
+            fi = self._get_individual(caught)
+            legend = bool(fi and fi.legend_candidate)
+            # 2D ファイト: アンカー = プレイヤー立ち位置 (足場) のグリッド基準点。
+            # 初期 fish 位置 = フッキング地点 (ルアー位置)。line_length_m は
+            # この2点間の斜距離から FightState が自動算出する。
+            anchor_cell = self._player_anchor_cell()
+            start_cell  = (caught.x, caught.y)
+            self._fight_hook_sx   = hook_sx
+            self._fight_hook_sy   = hook_sy
+            self.fight = FightState(
+                fish_size=caught.size,
+                hook_quality=quality,
+                anchor_cell=anchor_cell,
+                start_cell=start_cell,
+                meters_per_cell=TU.FIGHT_METERS_PER_CELL,
+                legend=legend,
+            )
+            self._fight_start_dist = self.fight.line_length_m
+            self._fight_fish = caught
+            self._fight_events.append((f"HOOKED! [{quality}]", 80))
+            self.rod.reset()
+            self.state = FS_FIGHT
+            return
+
+        # ── 50cm未満: 従来通り即キャッチ ──────────────────────────────
+        caught.hook()
+        self._after_catch_settled(caught)
+        self.rod.reset()   # 釣果後: ロッド角度・しなりを中立へ戻す
+        self.state = FS_KEEP_RELEASE
+
+    def _after_catch_settled(self, caught: Fish) -> None:
+        """キャッチ確定時の学習・再捕獲チェック (即キャッチ/ランディング共通)。"""
+        # Phase 9: キャッチ学習 (KEEP/RELEASE どちらでも起こる)
+        if caught.fish_id:
+            fi = self._get_individual(caught)
+            if fi:
+                fi.learn(
+                    "catch",
+                    self._current_lure_category(),
+                    self._current_game_day(),
+                )
+        # Phase 10: 再捕獲チェック
+        self._result_is_recapture = False
+        self._recapture_prev      = None
+        if caught.fish_id and self._population:
+            prev_hist = self._population.get_history(caught.fish_id)
+            if prev_hist is not None:
+                self._result_is_recapture = True
+                self._recapture_prev      = copy.copy(prev_hist)
+
+    # ── Beta v0.9: Fight update ───────────────────────────────────────
+
+    def _update_fight(self) -> None:
+        if not self.fight or not self._fight_fish:
+            self.state = FS_IDLE
+            return
+
+        keys  = pygame.key.get_pressed()
+        mouse = pygame.mouse.get_pressed()
+        self.rod.update(keys)
+
+        rod_y = 1.0 if keys[pygame.K_DOWN] else (-1.0 if keys[pygame.K_UP] else 0.0)
+        rod_x = (1.0 if keys[pygame.K_RIGHT] else 0.0) - (1.0 if keys[pygame.K_LEFT] else 0.0)
+        reel  = bool(mouse[0])
+
+        self.fight.update(reel, rod_y, rod_x)
+
+        for msg in self.fight.pop_events():
+            self._fight_events.append((msg, 80))
+
+        # 他の魚はパトロール継続
+        for fish in self.fishes:
+            if fish is not self._fight_fish and fish.state not in (FISH_CAUGHT, REACT_BITE):
+                fish.update(None)
+
+        if not self.fight.done:
+            return
+
+        # ── 決着 ─────────────────────────────────────────────────────
+        if self.fight.outcome == OUTCOME_LANDED:
+            caught = self._fight_fish
+            caught.hook()
+            self._after_catch_settled(caught)
+            self.fight = None
+            self._fight_fish = None
+            self.rod.reset()   # 釣果後: ロッド角度・しなりを中立へ戻す
+            self.state = FS_KEEP_RELEASE
+        else:
+            self._lose_fight(self.fight.outcome)
+
+    def _lose_fight(self, reason: str, give_up: bool = False) -> None:
+        """フックアウト / ラインブレイク / ギブアップ処理。"""
+        caught = self._fight_fish
+        if caught:
+            # Phase 9: バラシ学習
+            if caught.fish_id:
+                fi = self._get_individual(caught)
+                if fi:
+                    fi.learn(
+                        "miss",
+                        self._current_lure_category(),
+                        self._current_game_day(),
+                    )
+            caught.miss()
+
+        self.fight = None
+        self._fight_fish = None
+        self._result_fish = None
+        self.rod.reset()   # バラシ/ギブアップ後: ロッドを中立へ戻す
+        self._result_action = "LOST"
+        self._result_lost_reason = "GIVE UP" if give_up else reason
+        self.state         = FS_RESULT
+        self._result_timer = RESULT_FRAMES // 2
+
+    def _miss_bite(self) -> None:
+        for fish in self.fishes:
+            if fish.state == REACT_BITE:
+                # Phase 9: バラシ学習 (フッキング後に逃げた)
+                if fish.fish_id:
+                    fi = self._get_individual(fish)
+                    if fi:
+                        fi.learn(
+                            "miss",
+                            self._current_lure_category(),
+                            self._current_game_day(),
+                        )
+                fish.miss()
+        self.lure.reset()   # バイト中は水中に残していたルアーを回収
+        self.rod.reset()    # すっぽ抜け後: ロッドを中立へ戻す
+        self.state        = FS_IDLE
+        self._bite_charge = 0.0
+
+    # ── Phase 10: Keep / Release ──────────────────────────────────────
+
+    def _keep_fish(self) -> None:
+        """K キー: 魚を持ち帰る。個体削除・報酬付与・釣果保存。"""
+        caught = self._result_fish
+        if not caught:
+            return
+
+        lure_name = LURE_CATALOG[self._lure_idx].name
+        current_day = self._current_game_day()
+
+        # 釣果履歴を記録 (population に委譲)
+        if caught.fish_id and self._population:
+            self._population.record_catch_history(
+                caught.fish_id, current_day, caught.size
+            )
+            # 湖から個体を削除 (再スポーンなし)
+            self._population.remove_caught(caught.fish_id)
+
+        # シーンからも除去
+        self.fishes = [f for f in self.fishes if f is not caught]
+
+        # 釣果ログ (FishingView ローカル)
+        entry: dict = {
+            "length":     caught.size,
+            "lure":       lure_name,
+            "ticks":      pygame.time.get_ticks(),
+            "point_name": self.spot_name,
+            "action":     "KEEP",
+        }
+        if caught.fish_id and caught.size >= 50.0:
+            entry["fish_id"] = caught.fish_id
+        self.catch_log.append(entry)
+
+        # 報酬 = length_cm × 10
+        reward = int(caught.size * 10)
+        if self._save_manager:
+            self._save_manager.money += reward
+
+        # セーブ
+        is_pb = False
+        if self._save_manager:
+            is_pb = self._save_manager.record_catch(
+                caught.size, self.spot_name, lure_name,
+                fish_id=caught.fish_id or "",
+                action="KEEP",
+            )
+            self._save_manager.save()
+
+        self._result_action  = "KEEP"
+        self._result_reward  = reward
+        self._result_is_pb   = is_pb
+        # _result_fish はまだ表示用に保持 (FS_RESULT タイマー終了で None に)
+        self.state            = FS_RESULT
+        self._result_timer    = RESULT_FRAMES
+
+    def _release_fish(self) -> None:
+        """R キー: 魚を湖に返す。個体維持・ペナルティ・釣果保存。"""
+        caught = self._result_fish
+        if not caught:
+            return
+
+        lure_name   = LURE_CATALOG[self._lure_idx].name
+        current_day = self._current_game_day()
+
+        # 釣果・リリース履歴を記録
+        if caught.fish_id and self._population:
+            self._population.record_catch_history(
+                caught.fish_id, current_day, caught.size
+            )
+            self._population.record_release_history(caught.fish_id)
+
+            # FishIndividual に release ペナルティ適用
+            fi = self._population.managed_fish.get(caught.fish_id)
+            if fi:
+                fi.release_count    += 1
+                fi.last_release_day  = current_day
+                fi.health            = max(0.1, fi.health - 0.05)
+                fi.caution           = min(1.0, fi.caution + 0.05)
+
+        # 魚を湖に戻す (シーンでリスポーン)
+        caught.respawn(self.uw_map.best_positions(10))
+
+        # 釣果ログ
+        entry: dict = {
+            "length":     self._result_size,
+            "lure":       lure_name,
+            "ticks":      pygame.time.get_ticks(),
+            "point_name": self.spot_name,
+            "action":     "RELEASE",
+        }
+        if caught.fish_id and self._result_size >= 50.0:
+            entry["fish_id"] = caught.fish_id
+        self.catch_log.append(entry)
+
+        if self._save_manager:
+            self._save_manager.record_catch(
+                self._result_size, self.spot_name, lure_name,
+                fish_id=caught.fish_id or "",
+                action="RELEASE",
+            )
+            self._save_manager.save()
+
+        self._result_action  = "RELEASE"
+        self._result_reward  = 0
+        self._result_is_pb   = False
+        self._result_fish    = None   # 魚はシーンに戻ったので参照を切る
+        self.state            = FS_RESULT
+        self._result_timer    = RESULT_FRAMES // 2  # 短めの表示
+
+    # ── Helpers ────────────────────────────────────────────────────────
+
+    # ── Phase 9: Learning helpers ──────────────────────────────────────
+
+    def _get_individual(self, fish: Fish) -> Optional[FishIndividual]:
+        """Fish オブジェクトに紐付く FishIndividual を返す (なければ None)。"""
+        if fish.fish_id and self._population:
+            return self._population.managed_fish.get(fish.fish_id)
+        return None
+
+    def _current_lure_category(self) -> str:
+        """現在のルアーのカテゴリ名を返す。"""
+        spec = get_spec_by_idx(self._lure_idx)
+        return getattr(spec, "lure_category", "hard_bait")
+
+    def _current_game_day(self) -> int:
+        """現在のゲーム内日数を返す (SaveManager から)。"""
+        if self._save_manager:
+            return self._save_manager.game_minutes // 1440
+        return 0
+
+    def _memory_modifier_for(self, fish: Fish) -> float:
+        """記憶・警戒心による bite_charge レート補正係数 [0.2, 1.0] を返す。
+        個体管理外の魚 (小型魚) は補正なし (1.0)。
+        """
+        fi = self._get_individual(fish)
+        if fi is None:
+            return 1.0
+        cat = self._current_lure_category()
+        mem = fi.memory_for_category(cat)
+        cau = fi.caution
+        modifier = (1.0 - mem) * (1.0 - cau * 0.5)
+        return max(0.2, min(1.0, modifier))
+
+    # ── End Phase 9 helpers ────────────────────────────────────────────
+
+    def _lure_spot_score(self) -> float:
+        if not self.lure.in_water:
+            return 0.0
+        lx, ly = int(self.lure.x), int(self.lure.y)
+        if 0 <= lx < UW_SIZE and 0 <= ly < UW_SIZE:
+            return self.uw_map.full_score(lx, ly)
+        return 0.0
+
+    def _visible_lure_for(self, fish: Fish, spot_score: float):
+        if fish.state in (REACT_APPROACH, REACT_CHASE):
+            return self.lure  # already committed
+        if fish.size >= PIN_SMALL_LIMIT and spot_score < PIN_LOW_SCORE:
+            return None
+        return self.lure
+
+    def _screen_to_uw(self, sx: int, sy: int) -> Tuple[Optional[int], Optional[int]]:
+        if not (0 <= sx < MAIN_W and WATER_Y0 <= sy <= WATER_NEAR_Y):
+            return None, None
+        ux = int((sx / MAIN_W) * (UW_SIZE - 1))
+        t  = (sy - WATER_Y0) / (WATER_NEAR_Y - WATER_Y0)
+        uy = int(t * (UW_SIZE - 1))
+        return max(0, min(UW_SIZE-1, ux)), max(0, min(UW_SIZE-1, uy))
+
+    def _uw_to_screen(self, ux: float, uy: float) -> Tuple[int, int]:
+        sx = int((ux / (UW_SIZE - 1)) * MAIN_W)
+        t  = uy / (UW_SIZE - 1)
+        sy = int(WATER_Y0 + t * (WATER_NEAR_Y - WATER_Y0))
+        return sx, sy
+
+    def _get_hovered_grid_cell(self) -> Tuple[Optional[int], Optional[int]]:
+        mx, my = pygame.mouse.get_pos()
+        gx, gy = mx - UW_GRID_X, my - UW_GRID_Y
+        if 0 <= gx < UW_SIZE * CELL_PX and 0 <= gy < UW_SIZE * CELL_PX:
+            return gx // CELL_PX, gy // CELL_PX
+        return None, None
+
+    # ══════════════════════════════════════════════════════════════════
+    # Drawing
+    # ══════════════════════════════════════════════════════════════════
+
+    def draw(self, surface: pygame.Surface) -> None:
+        self._draw_scene(surface)
+        self._draw_sidebar(surface)
+        self._draw_hud(surface)
+        if self.state == FS_FIGHT:
+            self._draw_fight_panel(surface)
+        else:
+            self._draw_status_panel(surface)
+
+    # ── Scene ──────────────────────────────────────────────────────────
+
+    def _draw_scene(self, surface: pygame.Surface) -> None:
+        # Sky
+        for y in range(SKY_Y0, SKY_Y1):
+            t = y / SKY_Y1
+            pygame.draw.line(surface,
+                             (int(50+t*80), int(100+t*80), int(180+t*50)),
+                             (0, y), (MAIN_W-1, y))
+        # Treeline
+        pygame.draw.rect(surface, (35,75,25), (0, SHORE_Y0, MAIN_W, SHORE_Y1-SHORE_Y0))
+        for tx in range(0, MAIN_W, 38):
+            h = 20 + (tx*13 % 30)
+            pygame.draw.rect(surface, (25,55,15), (tx, SHORE_Y1-h, 18, h))
+        # Horizon
+        pygame.draw.rect(surface, (90,150,210), (0, SHORE_Y1, MAIN_W, 18))
+        # Water gradient (手前端 WATER_NEAR_Y まで)
+        for y in range(WATER_Y0, WATER_NEAR_Y):
+            t = (y - WATER_Y0) / (WATER_NEAR_Y - WATER_Y0)
+            wr,wg,wb = int(18+t*35), int(65+t*45), int(155+t*25)
+            pygame.draw.line(surface, (wr,wg,wb), (0,y), (MAIN_W-1,y))
+            if (y - WATER_Y0) % 20 == 0:
+                pygame.draw.line(surface, (wr+18,wg+18,wb+18), (0,y+1),(MAIN_W-1,y+1), 1)
+        # Foreground water
+        pygame.draw.rect(surface, (12,45,110), (0, WATER_NEAR_Y, MAIN_W, SCREEN_H-WATER_NEAR_Y))
+
+        # ── ストラクチャー常時表示 (水中の影 + 水上の立ち木/岩/ウィード) ──
+        if self._struct_surf is not None:
+            surface.blit(self._struct_surf, (0, 0))
+
+        # Depth guide lines on water surface (faint horizontals per 0.5m)
+        if self.lure.in_water:
+            for depth_mark in [0.5, 1.0, 1.5, 2.0]:
+                _, my = self._uw_to_screen(self.lure.x, depth_mark * 1.5)
+                if WATER_Y0 <= my <= WATER_NEAR_Y:
+                    pygame.draw.line(surface, (30,80,130,60), (0,my), (MAIN_W-1,my), 1)
+
+        # ── V4: 魚影 (CHASE以上のみ; 追尾を感じさせる半透明シルエット) ──
+        if not self.debug_mode:
+            self._draw_fish_shadows(surface)
+
+        # ── Debug: 水中地形 + 魚をフィールドへ投影表示 ────────────────
+        if self.debug_mode:
+            self._draw_field_debug(surface)
+
+        # Cast cursor (idle): 十字キーで動かす黄色の小さな十字
+        if self.state == FS_IDLE:
+            mx, my = self._uw_to_screen(self.cast_cursor_x, self.cast_cursor_y)
+            pygame.draw.circle(surface, C_YELLOW, (mx, my), 10, 2)
+            for p0, p1 in [((mx-16,my),(mx-6,my)), ((mx+6,my),(mx+16,my)),
+                           ((mx,my-16),(mx,my-6)), ((mx,my+6),(mx,my+16))]:
+                pygame.draw.line(surface, C_YELLOW, p0, p1, 2)
+
+        # Intended cast marker (fading)
+        if self._intended_timer > 0 and self._intended_pos is not None:
+            iux,iuy = self._intended_pos
+            ix,iy = self._uw_to_screen(iux, iuy)
+            col = (200, 200, 100)
+            pygame.draw.circle(surface, col, (ix,iy), 12, 1)
+            pygame.draw.line(surface, col, (ix-15,iy),(ix+15,iy), 1)
+            pygame.draw.line(surface, col, (ix,iy-15),(ix,iy+15), 1)
+            if self.lure.in_water:
+                lx,ly = self._uw_to_screen(self.lure.x, self.lure.y)
+                pygame.draw.line(surface, col, (ix,iy), (lx,ly), 1)
+
+        # Lure
+        if self.lure.in_water:
+            lx,ly = self._uw_to_screen(self.lure.x, self.lure.y)
+            if 0 <= lx < MAIN_W and WATER_Y0 <= ly <= WATER_NEAR_Y:
+                action_col = _ACTION_COLOR.get(self.lure.action, C_LURE)
+                for i in range(1,5):
+                    pygame.draw.line(surface,(80,140,200),(lx-i*7,ly+1),(lx-i*5+2,ly+1),2)
+                pygame.draw.circle(surface, action_col, (lx,ly), 7)
+                pygame.draw.circle(surface, C_WHITE, (lx,ly), 7, 2)
+
+        # Splash
+        if self._splash_timer > 0 and self.lure.in_water:
+            lx,ly = self._uw_to_screen(self.lure.x, self.lure.y)
+            r = int((24-self._splash_timer)*2.5)+2
+            pygame.draw.circle(surface, C_WHITE, (lx,ly), r, 2)
+
+        # V5: 水面パーティクル (波紋/しぶき)
+        self._draw_particles(surface)
+
+        # ── Beta v0.9: Cast charge gauge ─────────────────────────────
+        if self.state == FS_CAST_CHARGE:
+            self._draw_cast_gauge(surface)
+
+        # ── Beta v0.9: Cast quality flash ────────────────────────────
+        if self._cast_quality_timer > 0 and self._cast_quality and self.font:
+            qcol = {
+                CAST_PERFECT: (80, 255, 120),
+                CAST_GOOD:    C_YELLOW,
+                CAST_EARLY:   (160, 160, 160),
+                CAST_LATE:    (255, 110, 60),
+            }.get(self._cast_quality, C_WHITE)
+            qs = self.font.render(self._cast_quality, True, qcol)
+            surface.blit(qs, (MAIN_W // 2 - qs.get_width() // 2, 200))
+
+        # ── Beta v0.9: Bite cue (ルアー別アタリ演出) ──────────────────
+        if self.state == FS_BITE and self.font_lg and self.font:
+            self._draw_bite_cue(surface)
+
+        # ── Beta v0.9: Fight scene (魚マーカー・ライン) ────────────────
+        if self.state == FS_FIGHT and self.fight:
+            self._draw_fight_scene(surface)
+
+        # ── Beta v0.9: Rod (動的描画) ─────────────────────────────────
+        self._draw_rod(surface)
+
+        # ── v0.95: Cast flight (飛んでいくルアー + 薄い軌跡) ───────────
+        if self.state == FS_CASTING:
+            self._draw_cast_flight(surface)
+
+        # ── Beta v0.9: Fight event flashes ────────────────────────────
+        if self._fight_events and self.font:
+            fy = 240
+            for msg, t in self._fight_events[-3:]:
+                alpha = min(1.0, t / 30.0)
+                col = (255, int(220 * alpha), int(60 * alpha))
+                es = self.font.render(msg, True, col)
+                surface.blit(es, (MAIN_W // 2 - es.get_width() // 2, fy))
+                fy += 30
+
+        # ── Phase 10: Keep / Release 選択オーバーレイ ────────────────
+        if self.state == FS_KEEP_RELEASE and self.font_lg:
+            dim = pygame.Surface((MAIN_W, SCREEN_H), pygame.SRCALPHA)
+            dim.fill((0, 0, 0, 160))
+            surface.blit(dim, (0, 0))
+
+            y = 150
+
+            # RECAPTURE 演出
+            if self._result_is_recapture and self._recapture_prev:
+                pulse = abs(math.sin(self._frame_count * 0.15))
+                rc = (int(255 * pulse + 200 * (1 - pulse)),
+                      int(200 * pulse + 150 * (1 - pulse)), 30)
+                rec_surf = self.font_lg.render("★ RECAPTURE ★", True, rc)
+                surface.blit(rec_surf, (MAIN_W // 2 - rec_surf.get_width() // 2, y))
+                y += rec_surf.get_height() + 6
+
+                prev = self._recapture_prev
+                info_lines = [
+                    (f"Last caught: Day {prev.last_caught_day + 1}", C_GRAY),
+                    (f"Was: {prev.best_length:.1f} cm  →  Now: {self._result_size:.1f} cm",
+                     C_YELLOW),
+                ]
+                for txt, col in info_lines:
+                    ts = self.font.render(txt, True, col)
+                    surface.blit(ts, (MAIN_W // 2 - ts.get_width() // 2, y))
+                    y += 26
+                y += 8
+            else:
+                # 通常キャッチ
+                cs = self.font_lg.render("CATCH!", True, C_GREEN)
+                surface.blit(cs, (MAIN_W // 2 - cs.get_width() // 2, y))
+                y += cs.get_height() + 6
+
+            # 個体情報
+            if self.font:
+                fish_lines = []
+                if self._result_fish_id and self._result_size >= 40.0:
+                    fish_lines.append((f"[{self._result_fish_id}]", (255, 200, 60)))
+                fish_lines.append((f"{self._result_size:.1f} cm", C_WHITE))
+                if self._result_fish:
+                    fi = (self._population.managed_fish.get(self._result_fish_id)
+                          if self._population and self._result_fish_id else None)
+                    if fi:
+                        fish_lines.append((f"Age {fi.age}", C_GRAY))
+                        if fi.release_count > 0:
+                            fish_lines.append((f"Released {fi.release_count}x", (100, 200, 255)))
+                for txt, col in fish_lines:
+                    ts = self.font.render(txt, True, col)
+                    surface.blit(ts, (MAIN_W // 2 - ts.get_width() // 2, y))
+                    y += 28
+
+                y += 16
+                # 区切り線
+                pygame.draw.line(surface, C_GRAY,
+                                 (MAIN_W // 2 - 140, y), (MAIN_W // 2 + 140, y), 1)
+                y += 12
+
+                reward_pts = int(self._result_size * 10)
+                keep_surf = self.font.render(
+                    f"[K]  KEEP   +{reward_pts} pt", True, (80, 220, 80))
+                rel_surf = self.font.render(
+                    "[R]  RELEASE", True, (80, 180, 255))
+                surface.blit(keep_surf, (MAIN_W // 2 - keep_surf.get_width() // 2, y))
+                y += 32
+                surface.blit(rel_surf,  (MAIN_W // 2 - rel_surf.get_width() // 2, y))
+
+        # ── Result overlay (KEEP / RELEASE 後) ───────────────────────
+        if self.state == FS_RESULT and self.font_lg:
+            dim = pygame.Surface((MAIN_W, SCREEN_H), pygame.SRCALPHA)
+            dim.fill((0, 0, 0, 140))
+            surface.blit(dim, (0, 0))
+
+            y = 190
+            if self._result_action == "KEEP":
+                cs = self.font_lg.render("KEEP!", True, (80, 220, 80))
+                surface.blit(cs, (MAIN_W // 2 - cs.get_width() // 2, y))
+                y += cs.get_height() + 10
+                if self.font:
+                    lines = []
+                    if self._result_fish_id and self._result_size >= 50.0:
+                        lines.append((f"[{self._result_fish_id}]", (255, 200, 60)))
+                    lines.append((f"{self._result_size:.1f} cm", C_WHITE))
+                    lines.append((f"+ {self._result_reward} pt", (80, 220, 80)))
+                    if self._result_is_pb:
+                        lines.append(("★  NEW PERSONAL BEST!", C_YELLOW))
+                    for txt, col in lines:
+                        ts = self.font.render(txt, True, col)
+                        surface.blit(ts, (MAIN_W // 2 - ts.get_width() // 2, y))
+                        y += 34
+            elif self._result_action == "RELEASE":
+                cs = self.font_lg.render("RELEASE!", True, (80, 180, 255))
+                surface.blit(cs, (MAIN_W // 2 - cs.get_width() // 2, y))
+                y += cs.get_height() + 10
+                if self.font:
+                    lines = []
+                    if self._result_fish_id and self._result_size >= 50.0:
+                        lines.append((f"[{self._result_fish_id}]", (255, 200, 60)))
+                    lines.append((f"{self._result_size:.1f} cm", C_WHITE))
+                    lines.append(("→ back to the lake", C_GRAY))
+                    for txt, col in lines:
+                        ts = self.font.render(txt, True, col)
+                        surface.blit(ts, (MAIN_W // 2 - ts.get_width() // 2, y))
+                        y += 34
+            elif self._result_action == "LOST":
+                # Beta v0.9: ファイト敗北 (フックアウト / ラインブレイク)
+                reason = self._result_lost_reason
+                if reason == OUTCOME_LINE_BREAK:
+                    title, tcol = "LINE BREAK!", (255, 80, 60)
+                elif reason == "GIVE UP":
+                    title, tcol = "GAVE UP...", C_GRAY
+                else:
+                    title, tcol = "HOOK OUT...", (200, 160, 255)
+                cs = self.font_lg.render(title, True, tcol)
+                surface.blit(cs, (MAIN_W // 2 - cs.get_width() // 2, y))
+                y += cs.get_height() + 10
+                if self.font:
+                    ts = self.font.render("The fish got away.", True, C_GRAY)
+                    surface.blit(ts, (MAIN_W // 2 - ts.get_width() // 2, y))
+            else:
+                # フォールバック (旧フロー)
+                if self._result_fish:
+                    cs = self.font_lg.render("CATCH!", True, C_GREEN)
+                    surface.blit(cs, (MAIN_W // 2 - cs.get_width() // 2, y))
+                    y += cs.get_height() + 10
+                    if self.font:
+                        ts = self.font.render(
+                            f"{self._result_fish.size:.1f} cm", True, C_WHITE)
+                        surface.blit(ts, (MAIN_W // 2 - ts.get_width() // 2, y))
+
+    def _draw_fish_shadows(self, surface: pygame.Surface) -> None:
+        """CHASE以上の魚を半透明黒シルエットで水面に投影する (追尾中のみ)。
+
+        魚本体は描かない。「魚がいる/追っている」を感じさせるのが目的。
+        ルアーを追っている向きへシルエットを傾け、進行方向を伝える。
+        魚スプライトの描き込みは意図的にしない (Visual Pass の優先順位)。
+        """
+        if not self.lure.in_water:
+            return
+        lx, ly = self._uw_to_screen(self.lure.x, self.lure.y)
+        for fish in self.fishes:
+            if fish.state not in (REACT_CHASE, REACT_BITE):
+                continue
+            fx, fy = self._uw_to_screen(fish.x, fish.y)
+            if not (0 <= fx < MAIN_W and WATER_Y0 <= fy <= WATER_NEAR_Y):
+                continue
+            # 奥ほど小さく + サイズ反映。BITEは少し濃く
+            depth_scale = 0.5 + 0.5 * (fish.y / (UW_SIZE - 1))
+            body_len = int((14 + fish.size * 0.55) * depth_scale)
+            body_h   = max(4, int(body_len * 0.42))
+            alpha    = 70 if fish.state == REACT_CHASE else 105
+            # シルエット (小サーフェスに描いてルアー方向へ回転)
+            pad = 4
+            sw, sh = body_len + pad * 2, body_h + pad * 2
+            shp = pygame.Surface((sw, sh), pygame.SRCALPHA)
+            pygame.draw.ellipse(shp, (5, 12, 20, alpha),
+                                (pad, pad, body_len, body_h))
+            # 尾びれ
+            tail = body_h
+            pygame.draw.polygon(
+                shp, (5, 12, 20, alpha),
+                [(pad + 2, sh // 2),
+                 (pad - 3, sh // 2 - tail // 2),
+                 (pad - 3, sh // 2 + tail // 2)])
+            ang = math.degrees(math.atan2(-(ly - fy), lx - fx))  # ルアー方向
+            rot = pygame.transform.rotate(shp, ang)
+            surface.blit(rot, (fx - rot.get_width() // 2,
+                               fy - rot.get_height() // 2))
+
+    def _draw_field_debug(self, surface: pygame.Surface) -> None:
+        """デバッグ: 水中地形セルと魚をメインビューの水面へ投影描画する。"""
+        overlay = pygame.Surface((MAIN_W, SCREEN_H), pygame.SRCALPHA)
+
+        # 地形セル (flat 以外のみ; 半透明)
+        for cy in range(UW_SIZE):
+            for cx in range(UW_SIZE):
+                cell = self.uw_map.cell(cx, cy)
+                if cell.terrain == TERRAIN_ROCK:
+                    color = C_ROCK_CELL
+                elif cell.cover:
+                    color = C_COVER_CELL
+                elif cell.weed:
+                    color = C_WEED_CELL
+                elif cell.terrain == TERRAIN_BREAK:
+                    color = C_BREAK_CELL
+                else:
+                    continue
+                x0, y0 = self._uw_to_screen(cx - 0.5, cy - 0.5)
+                x1, y1 = self._uw_to_screen(cx + 0.5, cy + 0.5)
+                pygame.draw.rect(
+                    overlay, (*color, 90),
+                    (x0, y0, max(1, x1 - x0 - 1), max(1, y1 - y0 - 1)),
+                )
+
+        # 魚マーカー (リアクション色 + サイズ表示)
+        for fish in self.fishes:
+            if fish.state == FISH_CAUGHT:
+                continue
+            fx, fy = self._uw_to_screen(fish.x, fish.y)
+            col = _REACT_COLOR.get(fish.state, C_FISH_IDLE)
+            r = 5 + int(fish.size / 15)
+            pygame.draw.circle(overlay, (*col, 220), (fx, fy), r)
+            pygame.draw.circle(overlay, (255, 255, 255, 200), (fx, fy), r, 1)
+            if self.font_sm:
+                ts = self.font_sm.render(f"{fish.size:.0f}", True, C_WHITE)
+                overlay.blit(ts, (fx + r + 2, fy - 8))
+
+        surface.blit(overlay, (0, 0))
+
+    # ── Beta v0.9: New drawing helpers ─────────────────────────────────
+
+    def _draw_cast_gauge(self, surface: pygame.Surface) -> None:
+        """キャスト溜めゲージ (PERFECT/GOODゾーン表示付き)。"""
+        GW, GH = 320, 26
+        GX, GY = MAIN_W // 2 - GW // 2, 560
+
+        pygame.draw.rect(surface, (25, 25, 35), (GX, GY, GW, GH))
+        # ゾーン帯: EARLY(灰) / GOOD(黄) / PERFECT(緑) / LATE(赤)
+        def zone_x(v: float) -> int:
+            return GX + int(GW * min(1.0, v / CAST_CHARGE_MAX))
+        pygame.draw.rect(surface, (70, 70, 70),
+                         (GX, GY, zone_x(CAST_GOOD_LO) - GX, GH))
+        pygame.draw.rect(surface, (130, 120, 40),
+                         (zone_x(CAST_GOOD_LO), GY,
+                          zone_x(CAST_PERFECT_LO) - zone_x(CAST_GOOD_LO), GH))
+        pygame.draw.rect(surface, (40, 140, 60),
+                         (zone_x(CAST_PERFECT_LO), GY,
+                          zone_x(CAST_PERFECT_HI) - zone_x(CAST_PERFECT_LO), GH))
+        pygame.draw.rect(surface, (130, 110, 40),
+                         (zone_x(CAST_PERFECT_HI), GY,
+                          zone_x(100.0) - zone_x(CAST_PERFECT_HI), GH))
+        pygame.draw.rect(surface, (150, 50, 40),
+                         (zone_x(100.0), GY, GX + GW - zone_x(100.0), GH))
+
+        # 現在値マーカー
+        mx = zone_x(self._cast_charge)
+        pygame.draw.line(surface, C_WHITE, (mx, GY - 4), (mx, GY + GH + 4), 3)
+        pygame.draw.rect(surface, C_WHITE, (GX, GY, GW, GH), 2)
+
+        if self.font_sm:
+            lbl = self.font_sm.render(
+                "Release in the GREEN zone!", True, C_WHITE)
+            surface.blit(lbl, (GX + GW // 2 - lbl.get_width() // 2, GY + GH + 8))
+
+    def _draw_bite_cue(self, surface: pygame.Surface) -> None:
+        """アタリは竿先の引き込み (_rod_tension_visual) で伝える。
+        画面表示はロッド付近の「!」と水面演出のみに抑える。
+        操作ヒントは画面下部HUD ("Press DOWN to hookset!") に常設。
+        """
+        # トップ: 重みが乗る前は水面の演出のみ (まだ合わせない)
+        if (self._bite_mode == HOOKSET_VISUAL_DELAY
+                and self._bite_elapsed < self._weight_on_frame):
+            if (self._bite_elapsed // 10) % 2 == 0 and self.font:
+                ts = self.font.render("splash!", True, (150, 200, 255))
+                surface.blit(ts, (MAIN_W // 2 - ts.get_width() // 2, WATER_Y0 + 30))
+            return
+
+        # ロッドの手元に「!」 — 強いアタリほど大きく速く点滅
+        strong = self._bite_type == BITE_HEAVY_STRIKE
+        if (self._bite_elapsed // (6 if strong else 12)) % 2 == 0:
+            f = self.font_lg if (strong and self.font_lg) else self.font
+            if f:
+                col = (255, 80, 60) if strong else (255, 220, 120)
+                cs = f.render("!", True, col)
+                surface.blit(cs, (self.rod_anchor[0] - 50, SCREEN_H - 170))
+
+    def _rod_tension_visual(self) -> float:
+        """描画用テンション値 (状態に応じて算出)。"""
+        if self.state == FS_FIGHT and self.fight:
+            return self.fight.tension
+        if self.state == FS_CAST_CHARGE:
+            # 振りかぶり: 溜めに応じて後方へしなる表現の代用
+            return min(1.0, self._cast_charge / 100.0) * 0.5
+        if self.state == FS_BITE:
+            # アタリ: 竿先が引き込まれる。ルアー別に引っ張りの強さ・リズムが違う
+            t = self._bite_elapsed
+            if (self._bite_mode == HOOKSET_VISUAL_DELAY
+                    and t < self._weight_on_frame):
+                return 0.08   # トップ: バシャ! 後、まだ重みは乗っていない
+            if self._bite_type == BITE_LIGHT_TICK:
+                # ワーム系: コツ…コツ…と小さく引き込まれる
+                pulse = max(0.0, math.sin(t * 0.30)) ** 3
+                return 0.10 + 0.25 * pulse
+            if self._bite_type == BITE_MEDIUM_TICK:
+                # ミノー/ジグ: 明確にティップが入る
+                pulse = max(0.0, math.sin(t * 0.24)) ** 2
+                return 0.15 + 0.35 * pulse
+            # クランク/スピナベ/トップ重みあり: ゴン! 強く引き込まれ続ける
+            return 0.50 + 0.20 * abs(math.sin(t * 0.12))
+        if self.state == FS_RETRIEVE and self.lure.in_water:
+            # 糸ふけがある間はテンションが乗らない (竿はほぼ真っ直ぐ)
+            if self.lure.slack >= 0.1:
+                return 0.03
+            base = 0.12
+            if self.lure.action == ACTION_RETRIEVE:
+                base += 0.10 * self.lure.retrieve_mult
+            elif self.lure.action == ACTION_LIFT:
+                base += 0.14
+            return base
+        return 0.05
+
+    @property
+    def rod_anchor(self) -> Tuple[int, int]:
+        """ロッドのバット位置 (画面座標)。プレイヤーの立ち位置 x に連動し、
+        画面下端の下 (手元) から伸びる。"""
+        return (int(self.player_stance_x * MAIN_W), ROD_BASE_Y)
+
+    def _player_anchor_cell(self) -> Tuple[float, float]:
+        """プレイヤー立ち位置の水中グリッド基準点 (足場)。
+
+        x = 立ち位置 (player_stance_x)、y = 手前端 (= 岸 / プレイヤー側)。
+        ファイトのライン長・寄せ方向はこの点を基準に2Dで計算する。
+        """
+        ax = self.player_stance_x * (UW_SIZE - 1)
+        ay = float(UW_SIZE - 1)
+        return (ax, ay)
+
+    def _retrieve_target_cell_x(self) -> float:
+        """リトリーブの自然な寄せ先 = プレイヤーの立ち位置の列。
+        ロッドティップへ水平吸収させるのではなく、立ち位置基準のラインへ寄せる。"""
+        return max(0.0, min(float(UW_SIZE - 1),
+                            self.player_stance_x * (UW_SIZE - 1)))
+
+    def _draw_rod(self, surface: pygame.Surface) -> None:
+        """ロッド本体 + ラインを描画。"""
+        tension = self._rod_tension_visual()
+        # ロッドのしなりはルアー/魚の方向へ引き込まれる
+        target: Optional[Tuple[int, int]] = None
+        shake = 0.0
+        rod_flex = 1.0
+        if self.state == FS_FIGHT and self.fight:
+            target = self._fight_fish_screen_pos()
+            f = self.fight
+            # 大物ほど深く胴に入る (40cm:1.0 → 65cm:1.45)。ロッドを見れば大きさが分かる
+            rod_flex = 1.0 + max(0.0, (f.fish_size - 40.0)) * 0.018
+            # 高テンション警告: REDに入るほど・ライン負荷が溜まるほど激しく震える
+            if f.tension > T_YELLOW:
+                over = (f.tension - T_YELLOW) / (1.0 - T_YELLOW)
+                shake = 2.0 + 5.0 * over + 8.0 * f.line_stress_ratio
+        elif self.lure.in_water:
+            target = self._uw_to_screen(self.lure.x, self.lure.y)
+        tip = self.rod.draw(surface, self.rod_anchor, tension, rod_flex=rod_flex,
+                            length=TU.ROD_VISUAL_LENGTH, target=target, shake=shake)
+
+        # ライン: ティップ → ルアー (リトリーブ中) / 魚 (ファイト中)
+        line_col = (210, 220, 235)
+        if self.state == FS_FIGHT and self.fight:
+            fx, fy = self._fight_fish_screen_pos()
+            self._draw_fight_line(surface, tip, (fx, fy))
+        elif self.lure.in_water:
+            lx, ly = self._uw_to_screen(self.lure.x, self.lure.y)
+            if 0 <= lx < MAIN_W:
+                sag = min(1.0, self.lure.slack / 1.5)
+                if sag > 0.03:
+                    # 糸ふけ: ラインが弛んで垂れ下がる (2次ベジェ近似)
+                    cx = (tip[0] + lx) * 0.5
+                    cyt = (tip[1] + ly) * 0.5 + 18 + 70 * sag
+                    pts = []
+                    for i in range(13):
+                        t = i / 12.0
+                        bx = (1-t)**2 * tip[0] + 2*(1-t)*t * cx + t*t * lx
+                        by = (1-t)**2 * tip[1] + 2*(1-t)*t * cyt + t*t * ly
+                        pts.append((int(bx), int(by)))
+                    pygame.draw.lines(surface, (170, 180, 200), False, pts, 1)
+                    if self.lure.slack >= 0.4 and self.font_sm:
+                        sl = self.font_sm.render("slack", True, (150, 160, 180))
+                        surface.blit(sl, (int(cx) - sl.get_width() // 2,
+                                          int(cyt) + 4))
+                else:
+                    pygame.draw.line(surface, line_col, tip, (lx, ly), 1)
+
+    def _draw_cast_flight(self, surface: pygame.Surface) -> None:
+        """飛行中のルアー: 薄いライン軌跡 + 小さなルアー点 + ティップ→ルアーのライン。"""
+        t = min(1.0, self._cast_flight_timer / max(1, self._cast_flight_duration))
+        lx, ly = self._cast_flight_pos(t)
+        lx, ly = int(lx), int(ly)
+
+        # ロッドティップ → 飛行中ルアーのライン (放出されていく糸)
+        tip = self.rod.tip_pos(self.rod_anchor, length=TU.ROD_VISUAL_LENGTH)
+        pygame.draw.line(surface, (200, 210, 230), tip, (lx, ly), 1)
+
+        # 薄い軌跡
+        if len(self._cast_flight_trail) >= 2:
+            pts = [(int(px), int(py)) for px, py in self._cast_flight_trail]
+            ov = pygame.Surface((MAIN_W, SCREEN_H), pygame.SRCALPHA)
+            pygame.draw.lines(ov, (255, 255, 255, 70), False, pts, 1)
+            surface.blit(ov, (0, 0))
+
+        # ルアー点 (小さく)
+        pygame.draw.circle(surface, C_LURE, (lx, ly), 4)
+        pygame.draw.circle(surface, C_WHITE, (lx, ly), 4, 1)
+
+    def _draw_fight_line(self, surface: pygame.Surface,
+                         tip: Tuple[int, int], fish: Tuple[int, int]) -> None:
+        """ファイト中のライン: ゾーンで見え方が変わる。
+          BLUE(SLACK) : たるんで垂れ下がる (危険=フックアウト)
+          GREEN(SAFE) : 細い綺麗な直線
+          YELLOW(HIGH): 太く張り詰める
+          RED(DANGER) : 赤く点滅し、極限まで張る
+        ラインの角度がそのまま魚の進行方向を示す (fish 座標が lateral 反映)。
+        """
+        f = self.fight
+        z = f.zone
+        tx, ty = tip
+        fxp, fyp = fish
+
+        if z == "BLUE":
+            # たるみ: テンションが低いほど大きく垂れる (2次ベジェ)
+            slack = (T_GREEN - f.tension) / T_GREEN   # 0..1
+            mx = (tx + fxp) * 0.5
+            my = (ty + fyp) * 0.5 + 20 + 70 * max(0.0, slack)
+            pts = []
+            for i in range(15):
+                t = i / 14.0
+                bx = (1-t)**2 * tx + 2*(1-t)*t * mx + t*t * fxp
+                by = (1-t)**2 * ty + 2*(1-t)*t * my + t*t * fyp
+                pts.append((int(bx), int(by)))
+            pygame.draw.lines(surface, (150, 170, 195), False, pts, 1)
+            return
+
+        if z == "GREEN":
+            col, w = (220, 235, 250), 1
+        elif z == "YELLOW":
+            col, w = (255, 240, 180), 2          # 張り詰め: 太く明るく
+        else:  # RED
+            blink = (self._frame_count % 8) < 4
+            col = (255, 70, 50) if blink else (255, 150, 120)
+            w = 3
+        pygame.draw.line(surface, col, tip, (fxp, fyp), w)
+        if z == "RED":
+            # 張り極限: ラインに沿って白いハイライトを重ねる
+            pygame.draw.line(surface, (255, 220, 210), tip, (fxp, fyp), 1)
+
+    def _fight_fish_screen_pos(self) -> Tuple[int, int]:
+        """ファイト中の魚の画面位置。
+
+        魚のグリッド座標 (fish_x, fish_y) をそのまま画面座標へ変換する。
+        立ち位置 (アンカー) 方向へ寄せれば、画面上でも魚が立ち位置側へ引かれる。
+        ライン角度 = ティップ→魚 がそのまま 2D の引き方向を表す。
+        """
+        f = self.fight
+        fx, fy = self._uw_to_screen(f.fish_x, f.fish_y)
+        return max(20, min(MAIN_W - 20, fx)), max(WATER_Y0 + 20, min(WATER_NEAR_Y, fy))
+
+    def _draw_fight_scene(self, surface: pygame.Surface) -> None:
+        """水面の魚マーカー (波紋・向き矢印)。"""
+        f = self.fight
+        fx, fy = self._fight_fish_screen_pos()
+
+        # 波紋
+        r = 10 + int(abs(math.sin(f.frame * 0.1)) * 8)
+        pygame.draw.circle(surface, (220, 235, 255), (fx, fy), r, 2)
+        pygame.draw.circle(surface, (160, 200, 240), (fx, fy), r + 8, 1)
+
+        # 頭の向き矢印 (進行方向)
+        adx = 26 if f.head_dir > 0 else -26
+        pygame.draw.line(surface, C_YELLOW, (fx, fy), (fx + adx, fy), 3)
+        pygame.draw.line(surface, C_YELLOW, (fx + adx, fy),
+                         (fx + adx - (6 if f.head_dir > 0 else -6), fy - 5), 3)
+        pygame.draw.line(surface, C_YELLOW, (fx + adx, fy),
+                         (fx + adx - (6 if f.head_dir > 0 else -6), fy + 5), 3)
+
+        # 行動表示 (RUN中など)
+        if self.font_sm and f.behavior in ("RUN", "DIVE", "SHAKE"):
+            bs = self.font_sm.render(f.behavior + "!", True, (255, 160, 80))
+            surface.blit(bs, (fx - bs.get_width() // 2, fy - 30))
+
+        # 障害物警告
+        if f.obstacle_lock and self.font and (self._frame_count % 30) < 20:
+            ob = self.font.render("IN COVER! Pull the opposite way!", True, (255, 120, 50))
+            surface.blit(ob, (MAIN_W // 2 - ob.get_width() // 2, 300))
+
+        # ── 高テンション危険演出: 赤ビネット + 警告テキスト ──────────
+        # 「ヤバい、切れる!」と感じさせ、気づいて入力を離せば助かる
+        if f.zone == "RED":
+            reeling = bool(pygame.mouse.get_pressed()[0])
+            danger = max((f.tension - T_YELLOW) / (1.0 - T_YELLOW),
+                         f.line_stress_ratio)
+            pulse = abs(math.sin(self._frame_count * (0.35 if reeling else 0.18)))
+            a = int((50 + 110 * danger) * (0.45 + 0.55 * pulse))
+            vign = pygame.Surface((MAIN_W, SCREEN_H), pygame.SRCALPHA)
+            bw = 14 + int(18 * danger)
+            for rect in ((0, 0, MAIN_W, bw), (0, SCREEN_H - bw, MAIN_W, bw),
+                         (0, 0, bw, SCREEN_H), (MAIN_W - bw, 0, bw, SCREEN_H)):
+                pygame.draw.rect(vign, (255, 40, 25, a), rect)
+            surface.blit(vign, (0, 0))
+
+            if self.font_lg and self.font:
+                if reeling:
+                    msg, sub = "STOP REELING!!", "Release LMB / rod UP to save the line!"
+                elif f.line_stress_ratio > 0.25:
+                    msg, sub = "LINE BREAKING!", "Rod UP to release tension!"
+                else:
+                    msg, sub = "", ""
+                if msg and (self._frame_count % 14) < 9:
+                    ws = self.font_lg.render(msg, True, (255, 60, 40))
+                    surface.blit(ws, (MAIN_W // 2 - ws.get_width() // 2, 230))
+                    ss = self.font.render(sub, True, (255, 170, 150))
+                    surface.blit(ss, (MAIN_W // 2 - ss.get_width() // 2, 296))
+
+        # ランディング圏内表示
+        if f.distance <= LANDING_DIST_M and self.font:
+            pulse = (self._frame_count % 40) < 25
+            col = (80, 255, 120) if pulse else (50, 180, 90)
+            ls = self.font.render("LANDING RANGE!  Hold DOWN!", True, col)
+            surface.blit(ls, (MAIN_W // 2 - ls.get_width() // 2, 340))
+            if f.landing_progress > 0:
+                pw = int(180 * f.landing_progress / 50)
+                pygame.draw.rect(surface, (40, 40, 40),
+                                 (MAIN_W // 2 - 90, 372, 180, 10))
+                pygame.draw.rect(surface, (80, 255, 120),
+                                 (MAIN_W // 2 - 90, 372, pw, 10))
+
+    def _draw_fight_panel(self, surface: pygame.Surface) -> None:
+        """ファイト用下部パネル: テンションゲージ (青→緑→黄→赤) + 距離。"""
+        if not self.font or not self.font_sm:
+            return
+        f = self.fight
+        if not f:
+            return
+
+        PX, PY, PW, PH = 6, 560, 700, 130
+        bg = pygame.Surface((PW, PH), pygame.SRCALPHA)
+        bg.fill((0, 0, 0, 185))
+        surface.blit(bg, (PX, PY))
+        pygame.draw.rect(surface, (60, 60, 60), (PX, PY, PW, PH), 1)
+
+        surface.blit(self.font.render("FIGHT!", True, (255, 120, 60)), (PX + 10, PY + 6))
+        dist_s = self.font.render(f"Line out: {f.line_length_m:.1f} m", True, C_WHITE)
+        surface.blit(dist_s, (PX + 130, PY + 8))
+        hq = self.font_sm.render(f"Hook: {f.hook_quality}", True, C_GRAY)
+        surface.blit(hq, (PX + 340, PY + 12))
+
+        # デバッグ: フックホールド / 魚の体力 / ライン負荷の内部値
+        if self.debug_mode:
+            ctrl = "CTRL+" if f.control_success else ("wrong" if f.wrong_dir else "-")
+            dbg = self.font_sm.render(
+                f"hold {f.hook_hold:.0f}/{f._hook_hold_max:.0f}   "
+                f"stam {f.stamina_ratio * 100:.0f}%   "
+                f"stress {f._line_stress:.0f}/{TU.FIGHT_LINE_BREAK_STRESS:.0f}   "
+                f"{ctrl}",
+                True, (255, 200, 80))
+            surface.blit(dbg, (PX + 460, PY + 12))
+
+        # ── テンションゲージ (細い横長グラデ; 補助情報) ──────────────
+        GX, GY, GW, GH = PX + 14, PY + 58, self._GAUGE_W, self._GAUGE_H
+        def zx(v: float) -> int:
+            return GX + int(GW * v)
+        # SLACK / SAFE / DANGER ラベル (mockup 準拠)
+        self.font_sm and surface.blit(
+            self.font_sm.render("SLACK", True, (110, 150, 220)), (GX, GY - 18))
+        if self.font_sm:
+            sa = self.font_sm.render("SAFE", True, (90, 210, 110))
+            surface.blit(sa, (zx((T_BLUE + T_GREEN) / 2) - sa.get_width() // 2, GY - 18))
+            dg = self.font_sm.render("DANGER", True, (240, 90, 70))
+            surface.blit(dg, (GX + GW - dg.get_width(), GY - 18))
+        # グラデバー本体 (キャッシュ済み)
+        if self._gauge_surf is not None:
+            surface.blit(self._gauge_surf, (GX, GY))
+        pygame.draw.rect(surface, (90, 90, 100), (GX, GY, GW, GH), 1)
+        # ゾーン境界の薄い目盛り
+        for b in (T_BLUE, T_GREEN, T_YELLOW):
+            pygame.draw.line(surface, (20, 20, 25), (zx(b), GY), (zx(b), GY + GH), 1)
+        # 現在テンションのポインタ (上から下りる細い三角)
+        mx = zx(max(0.0, min(1.0, f.tension)))
+        pygame.draw.polygon(surface, C_WHITE,
+                            [(mx, GY - 2), (mx - 5, GY - 11), (mx + 5, GY - 11)])
+        pygame.draw.line(surface, C_WHITE, (mx, GY - 2), (mx, GY + GH + 2), 2)
+
+        # ゾーンラベル
+        zone = f.zone
+        zone_col = {
+            "BLUE":   (110, 160, 255),
+            "GREEN":  ( 90, 230, 120),
+            "YELLOW": (240, 210,  70),
+            "RED":    (255,  90,  60),
+        }[zone]
+        zs = self.font.render(f"TENSION: {zone}", True, zone_col)
+        surface.blit(zs, (GX, GY + GH + 8))
+
+        # 巻き時インジケータ: 安全に巻けるタイミングを明示する
+        if (zone in ("GREEN", "YELLOW") and f.behavior != "RUN"
+                and f.distance > LANDING_DIST_M):
+            on = (self._frame_count % 40) < 26
+            rc = (90, 255, 130) if on else (50, 150, 80)
+            rs = self.font.render("REEL NOW!", True, rc)
+            surface.blit(rs, (GX + GW - rs.get_width() - 6, GY + GH + 8))
+            pygame.draw.circle(surface, rc,
+                               (GX + GW - rs.get_width() - 20, GY + GH + 19), 6)
+
+        # 状況ヒント
+        if zone == "BLUE":
+            hint = "Too slack! Hook may come out - reel or rod DOWN"
+        elif zone == "RED":
+            hint = "DANGER! Stop reeling / rod UP!"
+        elif f.control_success:
+            hint = "Good! Rod against the fish - tiring it out"
+        elif f.behavior == "RUN":
+            hint = "Fish running - steer opposite to control it"
+        elif f.distance <= LANDING_DIST_M:
+            hint = "Hold DOWN to land the fish!"
+        else:
+            hint = "Reel to gain line / arrows to steer"
+        hs = self.font_sm.render(hint, True, (210, 210, 210))
+        surface.blit(hs, (GX + 220, GY + GH + 12))
+
+    # ── Sidebar ────────────────────────────────────────────────────────
+
+    def _draw_sidebar(self, surface: pygame.Surface) -> None:
+        pygame.draw.rect(surface, C_DARK, (SIDEBAR_X, 0, SIDEBAR_W, SCREEN_H))
+        pygame.draw.line(surface, C_GRAY, (SIDEBAR_X,0),(SIDEBAR_X,SCREEN_H),2)
+        if not self.font: return
+
+        title      = "DEBUG – Score" if self.debug_mode else "Underwater Map"
+        title_col  = (255,200,80) if self.debug_mode else C_WHITE
+        surface.blit(self.font.render(title, True, title_col), (SIDEBAR_X+10,10))
+
+        grid_surf = self._score_surf if self.debug_mode else self._terrain_surf
+        if grid_surf:
+            surface.blit(grid_surf, (UW_GRID_X, UW_GRID_Y))
+
+        # Pin-spot outlines in debug
+        if self.debug_mode:
+            for cy in range(UW_SIZE):
+                for cx in range(UW_SIZE):
+                    if self.uw_map.full_score(cx,cy) >= PIN_HIGH_SCORE:
+                        pygame.draw.rect(surface, C_WHITE,
+                            (UW_GRID_X+cx*CELL_PX, UW_GRID_Y+cy*CELL_PX, CELL_PX-1,CELL_PX-1),1)
+
+        pygame.draw.rect(surface, C_GRAY,
+            (UW_GRID_X-1,UW_GRID_Y-1,UW_SIZE*CELL_PX+2,UW_SIZE*CELL_PX+2),1)
+
+        # Fish dots (reaction-stage colour)
+        for fish in self.fishes:
+            if fish.state == FISH_CAUGHT: continue
+            fx = int(UW_GRID_X + fish.x * CELL_PX)
+            fy = int(UW_GRID_Y + fish.y * CELL_PX)
+            col = _REACT_COLOR.get(fish.state, C_FISH_IDLE)
+            r   = 5 if fish.state == REACT_BITE else 4
+            pygame.draw.circle(surface, col, (fx,fy), r)
+            if fish.state == REACT_BITE:
+                pygame.draw.circle(surface, C_WHITE, (fx,fy), r, 1)
+
+        # Lure dot
+        if self.lure.in_water:
+            lx = int(UW_GRID_X + self.lure.x * CELL_PX)
+            ly = int(UW_GRID_Y + self.lure.y * CELL_PX)
+            pygame.draw.circle(surface, C_LURE, (lx,ly), 5)
+            pygame.draw.circle(surface, C_WHITE, (lx,ly), 5, 1)
+
+        # Intended dot
+        if self._intended_timer > 0 and self._intended_pos:
+            iux,iuy = self._intended_pos
+            ix = int(UW_GRID_X + iux * CELL_PX)
+            iy = int(UW_GRID_Y + iuy * CELL_PX)
+            pygame.draw.circle(surface, (200,200,100), (ix,iy), 5, 1)
+
+        info_y = UW_GRID_Y + UW_SIZE*CELL_PX + 8
+        if self.debug_mode:
+            self._draw_debug_info(surface, info_y)
+        else:
+            self._draw_legend(surface, info_y)
+            self._draw_catch_log(surface, info_y + 96)
+
+    def _draw_legend(self, surface, base_y):
+        if not self.font_sm: return
+        items = [
+            (C_FLAT,"Flat"),(C_WEED_CELL,"Weed"),(C_COVER_CELL,"Cover"),
+            (C_BREAK_CELL,"Break"),(C_ROCK_CELL,"Rock"),
+            (C_FISH_IDLE,"Ignore"),(C_FISH_NOTICE,"Notice"),
+            (C_FISH_APPROACH,"Approach"),(C_FISH_ACTIVE,"Chase"),
+            (C_FISH_BITE_COL,"Bite"),(C_FISH_SPOOK,"Spook"),(C_LURE,"Lure"),
+        ]
+        for i,(col,lbl) in enumerate(items):
+            lx = SIDEBAR_X+10 + (i%2)*130
+            ly = base_y + (i//2)*22
+            pygame.draw.rect(surface, col, (lx,ly,12,12))
+            surface.blit(self.font_sm.render(lbl,True,C_WHITE),(lx+16,ly))
+
+    def _draw_debug_info(self, surface, base_y):
+        if not self.font_sm: return
+        y = base_y
+        # Scale bar
+        for v,lbl in [(0,"Low"),(6,"Mid"),(12,"High")]:
+            col = _score_to_heat(v)
+            sx  = SIDEBAR_X+10 + int(v/12*200)
+            pygame.draw.rect(surface,col,(sx,y,12,12))
+            surface.blit(self.font_sm.render(lbl,True,C_WHITE),(sx+14,y))
+        y += 18
+        hcx,hcy = self._get_hovered_grid_cell()
+        if hcx is not None:
+            cell  = self.uw_map.cell(hcx,hcy)
+            score = self.uw_map.full_score(hcx,hcy)
+            for j,(line,col) in enumerate([
+                (f"Cell ({hcx},{hcy})", C_YELLOW),
+                (f"  depth {cell.depth:.1f}m", C_WHITE),
+                (f"  weed  {'yes' if cell.weed else 'no'}", C_WHITE),
+                (f"  cover {'yes' if cell.cover else 'no'}", C_WHITE),
+                (f"  bait  {cell.bait}", C_WHITE),
+                (f"  score {score:.1f}", C_WHITE),
+            ]):
+                surface.blit(self.font_sm.render(line,True,col),(SIDEBAR_X+10,y+j*18))
+        y += 6*18+6
+        if self.lure.in_water:
+            score = self._lure_spot_score()
+            q = ("★★★ Excellent" if score >= PIN_HIGH_SCORE else
+                 "★★  Good"     if score >= PIN_LOW_SCORE  else "★   Poor")
+            qcol = C_GREEN if score >= PIN_HIGH_SCORE else (C_YELLOW if score >= PIN_LOW_SCORE else C_RED)
+            surface.blit(self.font_sm.render("Lure spot:", True, C_WHITE),(SIDEBAR_X+10,y))
+            surface.blit(self.font_sm.render(f"  {q} ({score:.1f})",True,qcol),(SIDEBAR_X+10,y+18))
+        y += 44
+        surface.blit(self.font_sm.render("Top 5 spots:",True,C_WHITE),(SIDEBAR_X+10,y))
+        for i,(bx,by) in enumerate(self.uw_map.best_positions(5)):
+            s = self.uw_map.full_score(bx,by)
+            pygame.draw.rect(surface,_score_to_heat(s),(SIDEBAR_X+10,y+18+i*18,10,10))
+            surface.blit(self.font_sm.render(f"  ({bx:2d},{by:2d}) {s:.1f}",True,C_WHITE),
+                         (SIDEBAR_X+18,y+18+i*18))
+        y += 18+5*18+8
+        self._draw_catch_log(surface, y)
+
+    def _draw_catch_log(self, surface, base_y):
+        if not self.font or not self.font_sm: return
+        surface.blit(self.font.render("Catch Log",True,C_WHITE),(SIDEBAR_X+10,base_y))
+        y = base_y + 26
+        # Personal best (from save_manager if available)
+        if self._save_manager and self._save_manager.personal_best:
+            pb_str = f"PB: {self._save_manager.personal_best_str}"
+            surface.blit(self.font_sm.render(pb_str, True, C_YELLOW), (SIDEBAR_X+10, y))
+            y += 20
+        for i, entry in enumerate(self.catch_log[-5:]):
+            s  = entry["ticks"] // 1000
+            mm, ss = s // 60, s % 60
+            length = entry.get("length", entry.get("size", 0.0))
+            fid    = entry.get("fish_id", "")
+            action = entry.get("action", "KEEP")
+            prefix = f"[{fid}] " if fid else ""
+            act_tag = "REL" if action == "RELEASE" else "KEP"
+            line   = f"{prefix}{length:.1f}cm  {act_tag}  {entry['lure']}  {mm:02d}:{ss:02d}"
+            if action == "RELEASE":
+                col = (100, 180, 255)
+            elif fid:
+                col = (255, 200, 60)
+            else:
+                col = C_GREEN
+            surface.blit(self.font_sm.render(line, True, col), (SIDEBAR_X+10, y+i*20))
+
+    # ── Status panel (bottom of scene) ────────────────────────────────
+
+    def _draw_status_panel(self, surface: pygame.Surface) -> None:
+        """Lure Type / Action / Depth / Match / Fish Reaction / Bite Window."""
+        if not self.font or not self.font_sm:
+            return
+
+        # 左上に配置 (中央のロッドと重ならないように)
+        PX, PY, PW, PH = 6, 36, 572, 192
+
+        # Background
+        bg = pygame.Surface((PW, PH), pygame.SRCALPHA)
+        bg.fill((0, 0, 0, 172))
+        surface.blit(bg, (PX, PY))
+        pygame.draw.rect(surface, (60,60,60), (PX, PY, PW, PH), 1)
+
+        y = PY + 6
+
+        # ── Section 1: Lure ──────────────────────────────────────────
+        spec       = get_spec_by_idx(self._lure_idx)
+        lure_col   = spec.color
+        lure_label = f"[{self._lure_idx+1}] {spec.name}"
+
+        surface.blit(self.font_sm.render("LURE", True, (180,180,180)), (PX+6, y))
+        ls = self.font.render(lure_label, True, lure_col)
+        surface.blit(ls, (PX+PW - ls.get_width() - 8, y - 2))
+        y += 18
+
+        # Action + depth
+        a_col = _ACTION_COLOR.get(self.lure.action, C_GRAY)
+        a_lbl = _ACTION_LABEL.get(self.lure.action, self.lure.action.upper())
+        lbl_surf = self.font.render(a_lbl, True, a_col)
+        surface.blit(lbl_surf, (PX+6, y))
+
+        depth_str = f"Depth {self.lure.depth:.1f}m"
+        surface.blit(self.font_sm.render(depth_str, True, C_WHITE), (PX+160, y+4))
+
+        y += 26
+        # Naturalness bar
+        surface.blit(self.font_sm.render("Natural", True, C_GRAY), (PX+6, y))
+        _draw_bar(surface, PX+70, y+2, 110, 10, self.lure.naturalness, (80,200,80))
+        # Appeal bar
+        surface.blit(self.font_sm.render("Appeal", True, C_GRAY), (PX+200, y))
+        _draw_bar(surface, PX+260, y+2, 110, 10, self.lure.appeal, (220,160,40))
+
+        y += 20
+        # Lure Match row
+        match     = self._lure_match()
+        if match >= 0.80:
+            mc = C_GREEN
+        elif match >= 0.55:
+            mc = C_YELLOW
+        else:
+            mc = C_RED
+        surface.blit(self.font_sm.render("Match", True, C_GRAY), (PX+6, y))
+        _draw_bar(surface, PX+60, y+2, 200, 10, match, mc)
+        surface.blit(self.font_sm.render(f"{match:.0%}", True, mc), (PX+268, y))
+
+        y += 22
+
+        # ── Section 2: Fish Reaction ─────────────────────────────────
+        pygame.draw.line(surface, (60,60,60), (PX+4,y), (PX+PW-4,y), 1)
+        y += 4
+        surface.blit(self.font_sm.render("FISH REACTION", True, (180,180,180)), (PX+6, y))
+        y += 18
+
+        # Sort fish by reaction priority (descending), skip caught
+        visible_fish = sorted(
+            [f for f in self.fishes if f.state != FISH_CAUGHT],
+            key=lambda f: REACTION_PRIORITY.get(f.state, 0),
+            reverse=True,
+        )
+        slot_w = PW // 5
+        for i, fish in enumerate(visible_fish[:5]):
+            sx = PX + i * slot_w + 4
+            col = _REACT_COLOR.get(fish.state, C_GRAY)
+            # Dot
+            pygame.draw.circle(surface, col, (sx+8, y+8), 5)
+            if fish.state == REACT_BITE:
+                flash = (self._frame_count % 20) < 10
+                if flash:
+                    pygame.draw.circle(surface, C_WHITE, (sx+8, y+8), 7, 1)
+            # Size
+            surface.blit(
+                self.font_sm.render(f"{fish.size:.0f}cm", True, C_WHITE),
+                (sx+16, y),
+            )
+            # Stage label
+            rlbl = _REACT_LABEL.get(fish.state, "?")
+            surface.blit(
+                self.font_sm.render(rlbl, True, col),
+                (sx+4, y+16),
+            )
+
+        y += 38
+
+        # ── Section 3: Bite Window ────────────────────────────────────
+        pygame.draw.line(surface, (60,60,60), (PX+4,y), (PX+PW-4,y), 1)
+        y += 4
+        surface.blit(self.font_sm.render("BITE WINDOW", True, (180,180,180)), (PX+6, y))
+        y += 18
+
+        # Charge bar colour
+        bc = self._bite_charge
+        if bc < 0.50:
+            bar_col = (50, 200, 80)
+        elif bc < 0.75:
+            bar_col = (230, 180, 30)
+        else:
+            pulse = (self._frame_count % 16) < 8
+            bar_col = (255, 80, 40) if pulse else (200, 50, 20)
+
+        _draw_bar(surface, PX+6, y, 300, 14, bc, bar_col)
+        pct_str = f"{bc*100:.0f}%"
+        surface.blit(self.font_sm.render(pct_str, True, C_WHITE), (PX+316, y))
+
+        # Hint
+        if bc < 0.01:
+            hint = "Fish not in range"
+        elif bc < 0.50:
+            hint = "Pause (stop) or tap DOWN (twitch) to trigger bite"
+        elif bc < BITE_TRIGGER:
+            hint = "Bite incoming! Hold action!"
+        else:
+            hint = ""
+        if hint:
+            surface.blit(self.font_sm.render(hint, True, (200,200,200)), (PX+6, y+18))
+
+    # ── HUD (top overlay + bottom hints) ─────────────────────────────
+
+    def _draw_hud(self, surface: pygame.Surface) -> None:
+        if not self.font or not self.font_sm: return
+
+        # Spot info (top-left)
+        surface.blit(self.font.render(f"[ {self.spot_name} ]", True, C_WHITE), (10,10))
+        if self.spot_label:
+            surface.blit(self.font_sm.render(self.spot_label, True, C_GRAY), (10,36))
+
+        # F4 テストモード表示
+        if self._test_big_fish:
+            tm = self.font_sm.render(
+                "[F4 TEST] big fish spawned (52/58/64cm)", True, (255, 120, 220))
+            surface.blit(tm, (10, 108))
+
+        # State hint
+        hints = {
+            FS_IDLE:         "Arrows:Aim cast  A/D:Move footing  Hold LMB:charge, release:throw  |  1-6:lure",
+            FS_CAST_CHARGE:  "Release LMB in the GREEN zone!",
+            FS_RETRIEVE:     "LMB:Reel (tap=creep, mash=fast)  Arrows:Rod (v=twitch/lift ^=fall <>=steer)",
+            FS_BITE:         "> Press DOWN to hookset!",
+            FS_FIGHT:        "Arrows: rod control  LMB: reel  |  manage tension!",
+            FS_KEEP_RELEASE: "[K] KEEP  /  [R] RELEASE",
+            FS_RESULT:       "",
+        }
+        hint = hints.get(self.state,"")
+        if hint:
+            surface.blit(self.font_sm.render(hint, True, C_YELLOW), (10,55))
+
+        # Cast deviation
+        if self._intended_timer > 0 and self._intended_pos and self.lure.in_water:
+            dev = math.sqrt((self.lure.x - self._intended_pos[0])**2 +
+                            (self.lure.y - self._intended_pos[1])**2)
+            surface.blit(
+                self.font_sm.render(f"Cast deviation: {dev:.1f} cells", True, (200,200,100)),
+                (10,72),
+            )
+
+        # Pin-spot quality (only when lure is in water)
+        if self.lure.in_water:
+            score = self._lure_spot_score()
+            if score >= PIN_HIGH_SCORE:
+                qlbl,qcol = "*** Excellent - large fish active", C_GREEN
+            elif score >= PIN_LOW_SCORE:
+                qlbl,qcol = "**  Good spot", C_YELLOW
+            else:
+                qlbl,qcol = "*   Poor - small fish only", C_RED
+            surface.blit(self.font_sm.render(qlbl, True, qcol), (10,90))
+
+        # ── Environment info block (top-right) ───────────────────────
+        if self._env:
+            act      = self._env.activity_modifier
+            act_col  = (
+                C_GREEN  if act >= 0.90 else
+                C_YELLOW if act >= 0.60 else
+                C_RED
+            )
+            env_rows = [
+                (f"{self._env.month_day_str}  {self._env.season_label}", C_YELLOW),
+                (
+                    f"{self._env.weather}  "
+                    f"Air:{self._env.air_temp:.0f}C  "
+                    f"W:{self._env.water_temp:.0f}C",
+                    self._env.weather_color,
+                ),
+                (f"Wind: {self._env.wind_display}  Activity:{act:.0%}", act_col),
+            ]
+            for i, (line, col) in enumerate(env_rows):
+                ts = self.font_sm.render(line, True, col)
+                surface.blit(ts, (MAIN_W - ts.get_width() - 10, 10 + i * 18))
+        else:
+            # Catches count (top-right, fallback)
+            surface.blit(
+                self.font.render(f"Catches: {len(self.catch_log)}", True, C_WHITE),
+                (MAIN_W-160, 10),
+            )
+
+        # Bottom hints
+        surface.blit(
+            self.font_sm.render("D: debug" + (" ON" if self.debug_mode else ""), True, (170,170,170)),
+            (10, SCREEN_H-42),
+        )
+        surface.blit(
+            self.font_sm.render("ESC: back to map", True, C_GRAY),
+            (10, SCREEN_H-24),
+        )
+
+        # ── Lure key strip (bottom-right area) ───────────────────────
+        strip_x = 600
+        strip_y = SCREEN_H - 42
+        for i, spec in enumerate(LURE_CATALOG):
+            is_cur = (i == self._lure_idx)
+            lbl   = f"{i+1}:{spec.name[:4]}"
+            col   = spec.color if is_cur else (100, 100, 100)
+            ts    = self.font_sm.render(lbl, True, col)
+            bx    = strip_x + i * 62
+            if is_cur:
+                pygame.draw.rect(surface, (40, 40, 60), (bx - 2, strip_y - 2, ts.get_width()+4, ts.get_height()+4))
+                pygame.draw.rect(surface, spec.color,   (bx - 2, strip_y - 2, ts.get_width()+4, ts.get_height()+4), 1)
+            surface.blit(ts, (bx, strip_y))
+
+        # Second strip line: Match % for current lure
+        match  = self._lure_match()
+        mcol   = C_GREEN if match >= 0.80 else (C_YELLOW if match >= 0.55 else C_RED)
+        cur_spec = get_spec_by_idx(self._lure_idx)
+        mline  = (
+            f"{cur_spec.name}  Depth {self.lure.depth:.1f}m  Match {match:.0%}"
+        )
+        msurf  = self.font_sm.render(mline, True, mcol)
+        surface.blit(msurf, (strip_x, strip_y + 18))

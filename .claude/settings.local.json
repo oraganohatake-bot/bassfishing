@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import pygame; print\\(pygame.version.ver\\)\")",
+      "Bash(pip3 install *)",
+      "Bash(timeout 5 python3 main.py)"
+    ]
+  }
+}

@@ -1,0 +1,410 @@
+{
+  "money": 16462,
+  "catch_log": [
+    {
+      "length": 57.2,
+      "point_name": "SE Cove",
+      "lure": "Crankbait",
+      "time": "Day 1  06:00",
+      "action": "KEEP"
+    },
+    {
+      "length": 56.6,
+      "point_name": "SE Cove",
+      "lure": "Crankbait",
+      "time": "Day 1  06:00",
+      "action": "RELEASE"
+    },
+    {
+      "length": 24.8,
+      "point_name": "West Bank",
+      "lure": "Minnow",
+      "time": "Day 1  06:46",
+      "action": "RELEASE"
+    },
+    {
+      "length": 24.0,
+      "point_name": "West Bank",
+      "lure": "Minnow",
+      "time": "Day 1  07:12",
+      "action": "RELEASE"
+    },
+    {
+      "length": 23.2,
+      "point_name": "West Bank",
+      "lure": "Minnow",
+      "time": "Day 1  07:52",
+      "action": "RELEASE"
+    },
+    {
+      "length": 24.6,
+      "point_name": "West Bank",
+      "lure": "Minnow",
+      "time": "Day 1  17:07",
+      "action": "KEEP"
+    },
+    {
+      "length": 53.3,
+      "point_name": "West Bank",
+      "lure": "Jig",
+      "time": "Day 1  20:37",
+      "action": "KEEP",
+      "fish_id": "B520003"
+    },
+    {
+      "length": 41.5,
+      "point_name": "West Bank",
+      "lure": "Jig",
+      "time": "Day 2  08:18",
+      "action": "KEEP",
+      "fish_id": "B410005"
+    },
+    {
+      "length": 31.3,
+      "point_name": "SW Brush",
+      "lure": "Spinnerbait",
+      "time": "Day 2  17:02",
+      "action": "KEEP"
+    },
+    {
+      "length": 23.8,
+      "point_name": "SW Brush",
+      "lure": "Spinnerbait",
+      "time": "Day 3  06:18",
+      "action": "KEEP"
+    },
+    {
+      "length": 29.9,
+      "point_name": "South Flat",
+      "lure": "Minnow",
+      "time": "Day 3  07:11",
+      "action": "KEEP"
+    },
+    {
+      "length": 26.1,
+      "point_name": "South Flat",
+      "lure": "Minnow",
+      "time": "Day 3  08:12",
+      "action": "KEEP"
+    },
+    {
+      "length": 33.8,
+      "point_name": "South Flat",
+      "lure": "Topwater",
+      "time": "Day 3  16:01",
+      "action": "KEEP"
+    },
+    {
+      "length": 30.5,
+      "point_name": "SW Brush",
+      "lure": "Minnow",
+      "time": "Day 3  17:18",
+      "action": "KEEP"
+    },
+    {
+      "length": 25.2,
+      "point_name": "SW Brush",
+      "lure": "Minnow",
+      "time": "Day 4  04:27",
+      "action": "KEEP"
+    },
+    {
+      "length": 29.4,
+      "point_name": "SW Brush",
+      "lure": "Minnow",
+      "time": "Day 4  05:11",
+      "action": "KEEP"
+    },
+    {
+      "length": 25.0,
+      "point_name": "SW Brush",
+      "lure": "Minnow",
+      "time": "Day 4  05:37",
+      "action": "KEEP"
+    },
+    {
+      "length": 29.4,
+      "point_name": "SW Brush",
+      "lure": "Minnow",
+      "time": "Day 4  06:34",
+      "action": "KEEP"
+    },
+    {
+      "length": 23.9,
+      "point_name": "SW Brush",
+      "lure": "Minnow",
+      "time": "Day 4  06:56",
+      "action": "KEEP"
+    },
+    {
+      "length": 35.9,
+      "point_name": "SW Brush",
+      "lure": "Minnow",
+      "time": "Day 4  07:23",
+      "action": "KEEP"
+    },
+    {
+      "length": 40.5,
+      "point_name": "SW Brush",
+      "lure": "Minnow",
+      "time": "Day 4  10:29",
+      "action": "KEEP",
+      "fish_id": "B410005"
+    },
+    {
+      "length": 54.5,
+      "point_name": "SW Brush",
+      "lure": "Minnow",
+      "time": "Day 4  11:16",
+      "action": "KEEP",
+      "fish_id": "B540002"
+    },
+    {
+      "length": 55.1,
+      "point_name": "SW Brush",
+      "lure": "Jig",
+      "time": "Day 4  13:36",
+      "action": "KEEP",
+      "fish_id": "B520003"
+    },
+    {
+      "length": 42.2,
+      "point_name": "SW Brush",
+      "lure": "Minnow",
+      "time": "Day 4  15:54",
+      "action": "RELEASE",
+      "fish_id": "B420007"
+    },
+    {
+      "length": 52.5,
+      "point_name": "SW Brush",
+      "lure": "Crankbait",
+      "time": "Day 4  18:12",
+      "action": "KEEP",
+      "fish_id": "B520003"
+    },
+    {
+      "length": 27.1,
+      "point_name": "SW Brush",
+      "lure": "Crankbait",
+      "time": "Day 4  18:45",
+      "action": "KEEP"
+    },
+    {
+      "length": 26.5,
+      "point_name": "West Bank",
+      "lure": "Minnow",
+      "time": "Day 5  12:34",
+      "action": "KEEP"
+    },
+    {
+      "length": 31.4,
+      "point_name": "SW Brush",
+      "lure": "Minnow",
+      "time": "Day 5  14:07",
+      "action": "KEEP"
+    },
+    {
+      "length": 26.4,
+      "point_name": "SW Brush",
+      "lure": "Minnow",
+      "time": "Day 5  14:58",
+      "action": "KEEP"
+    },
+    {
+      "length": 27.5,
+      "point_name": "SW Brush",
+      "lure": "Jig",
+      "time": "Day 5  15:33",
+      "action": "KEEP"
+    },
+    {
+      "length": 37.5,
+      "point_name": "SW Brush",
+      "lure": "Jig",
+      "time": "Day 5  16:17",
+      "action": "KEEP"
+    },
+    {
+      "length": 28.5,
+      "point_name": "SW Brush",
+      "lure": "Jig",
+      "time": "Day 5  18:30",
+      "action": "KEEP"
+    },
+    {
+      "length": 31.1,
+      "point_name": "SW Brush",
+      "lure": "Crankbait",
+      "time": "Day 5  19:45",
+      "action": "KEEP"
+    },
+    {
+      "length": 24.7,
+      "point_name": "SW Brush",
+      "lure": "Crankbait",
+      "time": "Day 5  20:14",
+      "action": "KEEP"
+    },
+    {
+      "length": 28.0,
+      "point_name": "SW Brush",
+      "lure": "Crankbait",
+      "time": "Day 6  09:53",
+      "action": "KEEP"
+    },
+    {
+      "length": 31.8,
+      "point_name": "SW Brush",
+      "lure": "Jig",
+      "time": "Day 6  10:45",
+      "action": "KEEP"
+    },
+    {
+      "length": 27.6,
+      "point_name": "SW Brush",
+      "lure": "Jig",
+      "time": "Day 6  11:50",
+      "action": "KEEP"
+    },
+    {
+      "length": 27.9,
+      "point_name": "SW Brush",
+      "lure": "Jig",
+      "time": "Day 6  12:16",
+      "action": "KEEP"
+    },
+    {
+      "length": 42.2,
+      "point_name": "SW Brush",
+      "lure": "Minnow",
+      "time": "Day 6  14:47",
+      "action": "KEEP",
+      "fish_id": "B420007"
+    },
+    {
+      "length": 49.6,
+      "point_name": "SW Brush",
+      "lure": "Jig",
+      "time": "Day 6  16:02",
+      "action": "KEEP",
+      "fish_id": "B490001"
+    },
+    {
+      "length": 27.5,
+      "point_name": "SW Brush",
+      "lure": "Jig",
+      "time": "Day 6  16:40",
+      "action": "KEEP"
+    },
+    {
+      "length": 43.1,
+      "point_name": "SW Brush",
+      "lure": "Jig",
+      "time": "Day 6  17:25",
+      "action": "KEEP",
+      "fish_id": "B420006"
+    },
+    {
+      "length": 31.5,
+      "point_name": "NW Drop-off",
+      "lure": "Topwater",
+      "time": "Day 6  18:39",
+      "action": "KEEP"
+    },
+    {
+      "length": 57.9,
+      "point_name": "NW Drop-off",
+      "lure": "Topwater",
+      "time": "Day 7  04:45",
+      "action": "KEEP"
+    },
+    {
+      "length": 52.9,
+      "point_name": "SW Brush",
+      "lure": "Minnow",
+      "time": "Day 7  06:21",
+      "action": "KEEP",
+      "fish_id": "B540002"
+    },
+    {
+      "length": 30.9,
+      "point_name": "SW Brush",
+      "lure": "Minnow",
+      "time": "Day 7  07:47",
+      "action": "KEEP"
+    },
+    {
+      "length": 24.5,
+      "point_name": "SW Brush",
+      "lure": "Crankbait",
+      "time": "Day 7  08:58",
+      "action": "KEEP"
+    },
+    {
+      "length": 32.8,
+      "point_name": "East Shore",
+      "lure": "Minnow",
+      "time": "Day 7  13:07",
+      "action": "KEEP"
+    },
+    {
+      "length": 33.8,
+      "point_name": "East Shore",
+      "lure": "Minnow",
+      "time": "Day 7  14:15",
+      "action": "KEEP"
+    },
+    {
+      "length": 27.5,
+      "point_name": "East Shore",
+      "lure": "Minnow",
+      "time": "Day 7  15:14",
+      "action": "KEEP"
+    },
+    {
+      "length": 25.7,
+      "point_name": "East Shore",
+      "lure": "Jig",
+      "time": "Day 7  16:58",
+      "action": "KEEP"
+    },
+    {
+      "length": 30.7,
+      "point_name": "East Shore",
+      "lure": "Jig",
+      "time": "Day 7  18:27",
+      "action": "KEEP"
+    },
+    {
+      "length": 36.2,
+      "point_name": "East Shore",
+      "lure": "Jig",
+      "time": "Day 7  20:03",
+      "action": "KEEP"
+    }
+  ],
+  "personal_best": {
+    "length": 57.9,
+    "point_name": "NW Drop-off",
+    "lure": "Topwater",
+    "time": "Day 7  04:45",
+    "action": "KEEP"
+  },
+  "discovered_spots": [
+    "SW Brush",
+    "West Bank",
+    "South Flat",
+    "NW Drop-off",
+    "SE Cove",
+    "East Shore"
+  ],
+  "player_tile": [
+    25,
+    38
+  ],
+  "game_minutes": 9843,
+  "env_state": {},
+  "population_state": {},
+  "npc_state": {}
+}
