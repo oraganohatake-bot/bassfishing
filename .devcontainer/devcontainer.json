@@ -1,0 +1,21 @@
+{
+  "name": "bass_rpg",
+  "image": "mcr.microsoft.com/devcontainers/python:3.9-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/desktop-lite:1": {}
+  },
+  "forwardPorts": [6080],
+  "portsAttributes": {
+    "6080": { "label": "desktop (noVNC)", "onAutoForward": "openPreview" }
+  },
+  "onCreateCommand": "sudo apt-get update && sudo apt-get install -y xvfb x11-utils libsdl2-2.0-0 libsdl2-image-2.0-0 libsdl2-mixer-2.0-0 libsdl2-ttf-2.0-0",
+  "postCreateCommand": "pip install --no-cache-dir -r requirements.txt",
+  "remoteEnv": {
+    "DISPLAY": ":1"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["ms-python.python"]
+    }
+  }
+}

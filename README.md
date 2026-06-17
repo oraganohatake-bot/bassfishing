@@ -26,6 +26,26 @@ python3 main.py
 
 ---
 
+## クラウド開発（GitHub Codespaces）
+
+このリポジトリは Codespaces で開発できる。`.devcontainer/` に環境定義があり、依存（`requirements.txt`＝pygame 2.6.1）と GUI 表示用の仮想デスクトップ（noVNC）が自動でセットアップされる。
+
+### 起動手順
+
+1. GitHub の `oraganohatake-bot/bassfishing` で **Code → Codespaces → Create codespace on main**。
+2. コンテナ構築完了を待つ（依存と xvfb / SDL ライブラリが自動インストールされる）。
+3. ターミナルで起動:
+
+   ```bash
+   python3 main.py
+   ```
+
+4. pygame のウィンドウは **ポート 6080（desktop / noVNC）** の転送先（ブラウザのプレビュー）に表示される。`DISPLAY=:1` は自動設定済み。
+
+> ヘッドレスでロジックだけ確認したい場合は、仮想ディスプレイ上でそのまま `python3 main.py` を実行できる（GUIはnoVNC側に出る）。
+
+---
+
 ## 操作方法
 
 ### 探索マップ（トップダウン）
