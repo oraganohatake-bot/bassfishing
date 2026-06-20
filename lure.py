@@ -91,6 +91,30 @@ class Lure:
         self._lift_rise: float = 0.0   # 現在のリフトで引き上げた深度 (m)
         self._lift_pull: float = 0.0   # 現在のリフトで寄せた距離 (セル≒m)
 
+    # ── Beta v0.96: ライン長 / スラック / エフェクティブテンション ──────
+
+    @property
+    def slack_m(self) -> float:
+        """ラインスラック量 (m)。self.slack の正式名 (後方互換のため別名)。"""
+        return self.slack
+
+    @property
+    def line_out_m(self) -> float:
+        """実際に出ているライン長 (m) = プレイヤー(y=31)からルアーまでの y距離。
+
+        リールだけがこれを縮められる (まずスラックを取り、その後 y を寄せる)。
+        ロッド操作 (トゥイッチ/リフト/フォール) では変化しない。
+        """
+        return max(0.0, self.PLAYER_Y - self.y) * TU.LINE_METERS_PER_CELL
+
+    @property
+    def effective_tension(self) -> float:
+        """張っているライン量 (m) = max(0, line_out_m - slack_m)。
+
+        スラックが大きいほどテンション伝達が落ちる。バイト/フッキング品質に影響。
+        """
+        return max(0.0, self.line_out_m - self.slack_m)
+
     # ── Public ─────────────────────────────────────────────────────────
 
     def cast(self, uw_x: float, uw_y: float) -> None:
@@ -182,27 +206,13 @@ class Lure:
                     self.in_water = False
                     return True
         elif self.action == ACTION_TWITCH:
-            if self.slack >= 0.1:
-                # 弛んだままのトゥイッチは糸ふけを叩くだけでルアーは動かない
-                if self.action_timer <= 8:
-                    self.slack = max(0.0, self.slack - 0.06)
-                self.speed = 0.0
-            else:
-                # Short impulse in the first 8 frames, then stationary
-                impulse = 0.05 if self.action_timer <= 8 else 0.0
-                self.y += impulse
-                self.speed = impulse
+            # Beta v0.96: ロッド操作は回収ではない。トゥイッチはその場で跳ねる
+            # アクションのみ (line_out_m は動かさない)。弛みは set_action で出る。
+            self.speed = 0.0
         elif self.action == ACTION_LIFT:
-            # 手前に寄るのは竿先の移動分のみ。弛みがあれば回収が先
-            pull = (
-                0.01
-                if (self.slack < 0.1
-                    and self._lift_pull < TU.ROD_LIFT_MAX_PULL_C)
-                else 0.0
-            )
-            self.y += pull
-            self.speed = pull
-            self._lift_pull += pull   # 引いた分はロッドを戻すと弛みになる
+            # Beta v0.96: リフトもルアーを手前へは寄せない。竿先で水中のルアーを
+            # 持ち上げる (深度 rise) だけ。寄せはリール専任。
+            self.speed = 0.0
         else:
             self.speed = 0.0
 

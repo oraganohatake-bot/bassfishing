@@ -15,12 +15,13 @@ Lure index → key binding
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Tuple
 
 from constants import (
     ACTION_IDLE, ACTION_RETRIEVE, ACTION_STOP,
     ACTION_TWITCH, ACTION_LIFT, ACTION_FALL,
 )
+import tuning as TU
 
 
 @dataclass
@@ -43,6 +44,24 @@ class LureSpec:
     # ── Phase 9: Fish Learning ──────────────────────────────────────────
     lure_category: str = "hard_bait"
     # Categories: hard_bait | soft_bait | topwater | vibration | bottom_contact
+    # ── Beta v0.96: 適正スラックレンジ (m) ──────────────────────────────
+    # このルアーが最も食う / 最も掛かる slack_m の帯。None ならカテゴリ既定。
+    optimal_slack_range: Tuple[float, float] = None
+
+
+# ── カテゴリ別 既定適正スラックレンジ (m) ────────────────────────────────
+# hard_bait  : テンション維持 → アクション → バイト (張って使う)
+# vibration  : 張りつつ波動を出す (やや幅)
+# soft_bait  : テンション抜き → フォール → バイト (弛ませて食わせる)
+# bottom_contact: しゃくる → slack発生 → フォール → バイト
+# topwater   : 水面で張る (ほぼ張ったまま)
+OPTIMAL_SLACK_BY_CATEGORY: dict = {
+    "hard_bait":      (0.0, 0.3),
+    "vibration":      (0.0, 0.4),
+    "soft_bait":      (0.4, 1.2),
+    "bottom_contact": (0.3, 1.0),
+    "topwater":       (0.0, 0.2),
+}
 
 
 # ── Condition key reference ──────────────────────────────────────────────
@@ -161,3 +180,26 @@ def get_spec(name: str) -> LureSpec:
 
 def get_spec_by_idx(idx: int) -> LureSpec:
     return LURE_CATALOG[idx % len(LURE_CATALOG)]
+
+
+def optimal_slack_range(spec: LureSpec) -> Tuple[float, float]:
+    """*spec* の適正スラックレンジ (m)。未指定ならカテゴリ既定を返す。"""
+    if spec.optimal_slack_range is not None:
+        return spec.optimal_slack_range
+    return OPTIMAL_SLACK_BY_CATEGORY.get(spec.lure_category, (0.0, 0.3))
+
+
+def slack_modifier(slack: float, rng: Tuple[float, float]) -> float:
+    """現在の *slack* (m) が適正レンジ *rng* にどれだけ合っているか。
+
+    レンジ内      → SLACK_BITE_OPTIMAL (1.0)
+    NEAR_TOL以内 → SLACK_BITE_NEAR    (0.7)
+    大きく外れる  → SLACK_BITE_FAR     (0.3)
+    """
+    lo, hi = rng
+    if lo <= slack <= hi:
+        return TU.SLACK_BITE_OPTIMAL
+    dist = (lo - slack) if slack < lo else (slack - hi)
+    if dist <= TU.SLACK_NEAR_TOL:
+        return TU.SLACK_BITE_NEAR
+    return TU.SLACK_BITE_FAR

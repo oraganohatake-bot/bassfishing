@@ -19,6 +19,7 @@ Phase 5 additions
 """
 
 from __future__ import annotations
+import asyncio
 from typing import Optional, Tuple
 
 import pygame
@@ -26,6 +27,7 @@ import pygame
 from constants import (
     SCREEN_W, SCREEN_H, TILE_SIZE, FPS,
     ST_EXPLORE, ST_FISHING,
+    FS_RETRIEVE, FS_FIGHT,
     C_LAND, C_BLACK, C_WHITE, C_YELLOW, C_GRAY, C_GREEN, C_RED,
 )
 from player import Player
@@ -35,6 +37,8 @@ from save_manager import SaveManager
 from environment import Environment
 from fish_population import FishPopulationManager
 from npc_manager import NPCManager
+from touch_controls import TouchControls
+from lure_catalog import LURE_NAMES
 
 # ── In-game clock rate ───────────────────────────────────────────────
 _FRAMES_PER_GAME_MINUTE = 60   # 1 real second = 1 game minute
@@ -51,7 +55,11 @@ class Game:
     def __init__(self):
         pygame.init()
         # IME (日本語変換) を無効化: キー入力で変換候補ウィンドウが出ないように
-        pygame.key.stop_text_input()
+        # WASM (pygbag) では未実装で例外になりうるため防御的に呼ぶ
+        try:
+            pygame.key.stop_text_input()
+        except Exception:
+            pass
         pygame.display.set_caption("Bass RPG  –  Beta v0.9")
         self.screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
         self.clock  = pygame.time.Clock()
@@ -77,6 +85,10 @@ class Game:
 
         # ── Phase 11: NPC Manager ────────────────────────────────────
         self.npc_manager = NPCManager()
+
+        # ── Touch controls (mobile / pygbag) ─────────────────────────
+        self.touch = TouchControls(SCREEN_W, SCREEN_H)
+        self.touch.install_key_patch()
 
         # ── Debug overlays ────────────────────────────────────────────
         self._show_pop_debug: bool = False
@@ -108,12 +120,18 @@ class Game:
     # Main loop
     # ------------------------------------------------------------------
 
-    def run(self) -> None:
+    async def run(self) -> None:
+        """Main loop. async so it works under pygbag (WebAssembly) too.
+
+        Each frame yields control with `await asyncio.sleep(0)`, which is a
+        no-op on desktop but is required for the browser event loop.
+        """
         while self.running:
             self._handle_events()
             self._update()
             self._draw()
             self.clock.tick(FPS)
+            await asyncio.sleep(0)
         pygame.quit()
 
     # ------------------------------------------------------------------
@@ -122,6 +140,11 @@ class Game:
 
     def _handle_events(self) -> None:
         for event in pygame.event.get():
+            # On-screen touch buttons get first crack; consumed events
+            # (taps on a virtual button) must not also reach cast/reel logic.
+            if self.touch.handle_event(event):
+                continue
+
             if event.type == pygame.QUIT:
                 self.running = False
 
@@ -262,6 +285,22 @@ class Game:
         # F3: NPC デバッグオーバーレイ
         if self._show_npc_debug:
             self._draw_npc_debug()
+
+        # Touch controls overlay (on top of the world, under flash text)
+        self.touch.mode = "fishing" if self.state == ST_FISHING else "explore"
+        self.touch.fish_state = (
+            self.fishing_view.state
+            if (self.state == ST_FISHING and self.fishing_view) else ""
+        )
+        self.touch.reel_enabled = bool(
+            self.state == ST_FISHING and self.fishing_view
+            and self.fishing_view.state in (FS_RETRIEVE, FS_FIGHT)
+        )
+        if self.state == ST_FISHING and self.fishing_view:
+            self.touch.lure_idx = self.fishing_view._lure_idx
+            self.touch.lure_name = LURE_NAMES[self.fishing_view._lure_idx]
+            self.touch.lure_count = len(LURE_NAMES)
+        self.touch.draw(self.screen)
 
         # Flash message (on top of any screen)
         if self._flash_timer > 0 and self._flash_msg:

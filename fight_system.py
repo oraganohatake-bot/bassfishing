@@ -30,6 +30,12 @@
   fish_stamina が下がると RUN/DIVE/向き変更の頻度・移動速度が落ち、
   ライン放出も弱まり、リールで寄せやすくなる。
 
+ポンピング (v0.96): 「竿を立てて溜める → 送りながら巻く」で通常巻きより速く
+  ラインを回収する操作。↓長押しで pump_charge を溜め (テンション上昇・高負荷)、
+  続けて ↑ + REEL で charge を消費し一気に寄せる。↓だけ/↑だけ・REELなしでは
+  効かない (REEL併用必須)。小物は通常巻きで十分なため効果が薄く、大物ほど有効。
+  RED中の無理なポンピングは line_stress / hook_hold を削りバラシ/ブレイクのリスク。
+
 ランディング: 距離1.5m以内 + ↓長押し。元気な魚 (stamina 高) ほど最後の
   突っ込みが起きやすく、バテた魚ほど成功しやすい。
 """
@@ -88,11 +94,12 @@ class FightState:
 
         # サイズ別AIパラメータ (tuning.FIGHT_SIZE_AI から検索)。
         # max_stamina 計算で run_power を使うため、先に確定させる。
-        for size_min, run_power, turn_freq, run_len in TU.FIGHT_SIZE_AI:
+        for size_min, run_power, turn_freq, run_len, reel_mult in TU.FIGHT_SIZE_AI:
             if fish_size >= size_min:
                 self._run_power = run_power
                 self._turn_freq = turn_freq
                 self._run_len   = run_len
+                self._reel_mult = reel_mult   # v0.96: サイズ別の寄せ効率倍率
                 break
 
         # スタミナ: サイズ × run_power に比例。run_power がサイズ階層を兼ねるため、
@@ -146,6 +153,13 @@ class FightState:
         self.landing_progress: int = 0
         self._final_dash_done: bool = False
 
+        # ポンピング (v0.96): ↓で溜め → ↑+REEL で一気に寄せる
+        self.pump_charge: float = 0.0     # ↓長押しで溜まる寄せポテンシャル
+        self.pump_cooldown: int = 0       # 使い切り後の再溜め待ち
+        self.pumping: bool = False        # UI表示: 今フレーム寄せが効いているか
+        self._pump_down_frames: int = 0   # ↓継続フレーム
+        self._pump_bonus: float = 0.0     # 今フレームの追加寄せ速度 (セル/f)
+
         self.outcome: Optional[str] = None
         self.events: List[str] = []        # UI フラッシュ用 (毎フレーム消費)
         self.frame: int = 0
@@ -191,6 +205,48 @@ class FightState:
     def done(self) -> bool:
         return self.outcome is not None
 
+    # ── Hooking v1: RUN_START (フッキング直後の最初の突っ走り) ─────────
+
+    def apply_run_start(self) -> float:
+        """フック成立 → ファイト開始の瞬間、サイズ別に line_out を一気に増やす。
+
+        魚をアンカー(プレイヤー立ち位置)から遠ざける方向へ押し出し、line_length_m を
+        burst させる。続けて B_RUN を固定し、走りが数フレーム見えるようにする。
+        返り値 = 出したライン量 (m)。
+        """
+        meters = 0.0
+        for size_min, (lo, hi) in TU.RUN_START_LINE_OUT:
+            if self.fish_size >= size_min:
+                meters = self._rng.uniform(lo, hi)
+                break
+        self._extend_line(meters)
+
+        # 突っ走り演出: しばらく B_RUN を固定し、沖向きの初速を与える
+        self.behavior = B_RUN
+        self._behavior_timer = TU.RUN_START_BURST_FRAMES
+        dx = self.fish_x - self.anchor_x
+        dy = self.fish_y - self.anchor_y
+        d = math.hypot(dx, dy)
+        if d > 1e-6:
+            self._vx = (dx / d) * TU.FIGHT_RUN_SPEED_BASE * self._run_power
+            self._vy = (dy / d) * TU.FIGHT_RUN_SPEED_BASE * self._run_power
+        return meters
+
+    def _extend_line(self, meters: float) -> None:
+        """アンカー→魚 の方向へ meters 分だけ魚を遠ざける (line_length_m を増やす)。"""
+        if meters <= 0.0:
+            return
+        cells = meters / self.meters_per_cell
+        dx = self.fish_x - self.anchor_x
+        dy = self.fish_y - self.anchor_y
+        d = math.hypot(dx, dy)
+        if d < 1e-6:
+            ux, uy = 0.0, -1.0   # 向きが無ければ沖(手前→奥)方向へ
+        else:
+            ux, uy = dx / d, dy / d
+        self.fish_x = max(0.0, min(float(UW_SIZE - 1), self.fish_x + ux * cells))
+        self.fish_y = max(0.0, min(float(UW_SIZE - 1), self.fish_y + uy * cells))
+
     # ── メイン更新 ────────────────────────────────────────────────────
 
     def update(self, reel: bool, rod_y: float, rod_x: float) -> None:
@@ -207,6 +263,7 @@ class FightState:
         self._update_steering(rod_x, rod_y)
         self._update_tension(reel, rod_y)
         self._update_zones(reel, rod_y)
+        self._update_pump(reel, rod_y)       # ポンピング: charge 蓄積/消費
         self._update_position(reel, rod_y)   # 2D 移動 (沖逃げ / 寄せ)
         self._update_obstacle(rod_x)
         self._update_landing(rod_y)
@@ -362,6 +419,50 @@ class FightState:
         if z != "RED":
             self._line_stress = max(0.0, self._line_stress - TU.FIGHT_STRESS_DECAY)
 
+    # ── ポンピング (溜め → 送りながら巻く) ─────────────────────────────
+
+    def _update_pump(self, reel: bool, rod_y: float) -> None:
+        """竿を立てて溜め (↓)、送りながら巻いて (↑+REEL) 一気に寄せる操作。
+
+        蓄積フェーズ (↓長押し):
+          pump_charge を溜める。テンションは _update_tension 側で上がる。高負荷:
+          スタミナを余分に消費し、RED中に無理をすると line_stress / hook_hold が削れる。
+          RUN中は溜まらない (まず走りを止めるのが先)。
+        回収フェーズ (↑ + REEL):
+          pump_charge を消費し、_pump_bonus として _update_position の寄せに上乗せ。
+          ↓だけ・↑だけ・REELなしでは効かない。使い切るとクールダウン。
+        小物は charge gain が小さく (run_power比例) 通常巻きで十分。大物ほど有効。
+        """
+        self.pumping = False
+        self._pump_bonus = 0.0
+        if self.pump_cooldown > 0:
+            self.pump_cooldown -= 1
+
+        # ── 蓄積: ↓で竿を立てる ──
+        if rod_y > 0 and self.behavior != B_RUN:
+            self._pump_down_frames += 1
+            if self._pump_down_frames >= TU.FIGHT_PUMP_LIFT_FRAMES:
+                gain = TU.FIGHT_PUMP_POWER * (0.5 + 0.5 * self._run_power)
+                self.pump_charge = min(TU.FIGHT_PUMP_CHARGE_MAX,
+                                       self.pump_charge + gain)
+                self.stamina -= TU.FIGHT_PUMP_STAMINA_COST
+                if self.zone == "RED":   # DANGER中の無理なポンピングはリスク増
+                    self._line_stress += TU.FIGHT_PUMP_RED_STRESS
+                    self.hook_hold -= TU.FIGHT_PUMP_RED_HOLD_DECAY
+        else:
+            self._pump_down_frames = 0
+
+        # ── 回収: ↑ で送りつつ REEL ──
+        if (reel and rod_y < 0 and self.pump_charge > 0.0
+                and self.pump_cooldown == 0):
+            spend = min(self.pump_charge, TU.FIGHT_PUMP_SPEND_RATE)
+            self.pump_charge -= spend
+            self._pump_bonus = spend * TU.FIGHT_PUMP_REEL_BONUS
+            self.pumping = True
+            if self.pump_charge <= 0.0:
+                self.pump_charge = 0.0
+                self.pump_cooldown = TU.FIGHT_PUMP_COOLDOWN
+
     # ── 2D 移動 (沖逃げ / 立ち位置方向への寄せ) ───────────────────────
 
     def _update_position(self, reel: bool, rod_y: float) -> None:
@@ -421,13 +522,18 @@ class FightState:
 
         # ── リール: アンカー(立ち位置)方向へ寄せる ──
         if reel and self.tension < 0.92:
-            # v0.95: 寄せ速度はリール係数 (retrieve_speed_mps) から導出。
+            # v0.96: 寄せ速度はファイト基準 (fight_reel_base_mps) × サイズ係数。
             # m/s → セル/フレーム換算し、疲労した魚ほど効率を上げる。
-            base = TU.EQUIPPED_REEL.retrieve_speed_mps / (self.meters_per_cell * 60.0)
+            # reel_mult で小物=速く寄る / 大物=なかなか寄らない を表現。
+            base = (TU.EQUIPPED_REEL.fight_reel_base_mps * self._reel_mult
+                    / (self.meters_per_cell * 60.0))
             gain = base * (1.0 - 0.1 + (1.0 - sr) * TU.FIGHT_REEL_FATIGUE_BONUS)
             if self.behavior == B_RUN:
                 gain *= 0.55   # 走られている間は寄せ効率が落ちる (が寄りはする)
             gain = max(TU.FIGHT_REEL_GAIN_FLOOR, gain)
+            # v0.96 ポンピング: ↑+REEL で溜めた charge を消費し一気に寄せる上乗せ。
+            # 走られ補正(×0.55)後に足すので、ランを止めつつ寄せる手応えになる。
+            gain += self._pump_bonus
             tvx -= off_x * gain
             tvy -= off_y * gain
             lat *= 0.25        # 巻いている間は横走りを抑えてアンカー方向へ収束させる

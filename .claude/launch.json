@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "pygbag-web",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["/Users/demetrius/Desktop/bass_rpg/web_serve.py"],
+      "port": 8000
+    }
+  ]
+}

@@ -17,6 +17,8 @@
 
 描画 (rod_visual_and_tension_design_v001.md):
   5〜7制御点の折れ線。bend_amount = line_tension * rod_flex。
+  v0.96: ロッドの向きは画面固定ではなく line_vec (バット→ルアー/魚) 基準。
+    ↑ でルアー側へ倒れ、↓ で立ち上がる。ルアーが左にあれば左へ倒れる。
 """
 
 from __future__ import annotations
@@ -143,15 +145,40 @@ class RodController:
         segments: int,
         target: Optional[Tuple[int, int]],
         shake: float,
+        bend_floor: float = 0.0,
     ) -> list:
-        """ロッドの折れ線制御点を計算して返す (描画と座標取得で共有)。"""
-        # 基本角度: まっすぐ立っている状態 (-90°=真上)。
-        # ↑↓ (rod_visual_y) ←→ (rod_visual_x) を合成。バット位置(anchor)が
-        # プレイヤーの立ち位置に連動するため、構え角オフセットは不要。
-        base_deg = -90.0 - self.rod_visual_y * 22.0 + self.rod_visual_x * 14.0
-        angle = math.radians(base_deg)
+        """ロッドの折れ線制御点を計算して返す (描画と座標取得で共有)。
+
+        bend_floor: ファイト中の常時荷重 (0..1)。テンションが抜けても竿先が
+          魚方向へ引き込まれたまま (= 魚に引かれている) になるよう曲げの下限を作る。
+        """
+        # v0.96: ロッドの基本向きは画面固定ではなく line_vec (バット→ターゲット)
+        # 基準で作る。target があればルアー/魚の方向へ自然に倒れ、無ければ従来の
+        # 真上基準にフォールバックする。操作ロジック (rod_visual_x/y) は不変。
+        vertical = math.radians(-90.0)   # 真上 = 立てた状態の基準
+        if target is not None:
+            # line_angle: バット→ターゲット。ルアーが左なら左、右なら右を向く。
+            line_angle = math.atan2(target[1] - anchor[1], target[0] - anchor[0])
+            # 真上からライン方向への倒れ込み (-π〜π に正規化)。
+            lean = (line_angle - vertical + math.pi) % (2.0 * math.pi) - math.pi
+            # ↑ (rod_visual_y<0): ルアー側へ倒す → lean を増やす
+            # ↓ (rod_visual_y>0): 立てる → lean を減らし、逆側へ起こす
+            lean_factor = (TU.ROD_LINE_NEUTRAL_LEAN
+                           - self.rod_visual_y * TU.ROD_LINE_INPUT_LEAN)
+            angle = vertical + lean * lean_factor
+            # ←→: ライン基準で左右へいなす (画面左右の傾き)
+            angle += math.radians(self.rod_visual_x * TU.ROD_LINE_STEER_DEG)
+        else:
+            # フォールバック: ターゲット不明時 (待機/キャスト前) は真上基準。
+            base_deg = -90.0 - self.rod_visual_y * 22.0 + self.rod_visual_x * 14.0
+            angle = math.radians(base_deg)
 
         bend_total = min(1.0, tension) * rod_flex
+        # ファイト中 (bend_floor>0): テンションが抜けても竿先は魚に引かれて
+        # 曲がったまま。↑で送ってもティップが魚方向を向き続ける。
+        if bend_floor > 0.0:
+            bend_total = max(bend_total, bend_floor)
+        bend_total = min(bend_total, 1.2)   # 曲げすぎ防止 (たわませすぎない)
         # 先端ほど曲がる: ティップがターゲット (ルアー/魚) 方向へ引き込まれる
         if target is not None:
             target_a = math.atan2(target[1] - anchor[1], target[0] - anchor[0])
@@ -189,10 +216,11 @@ class RodController:
         length: float = 290.0,
         segments: int = 6,
         target: Optional[Tuple[int, int]] = None,
+        bend_floor: float = 0.0,
     ) -> Tuple[int, int]:
         """描画せずにロッドティップの画面座標を返す (リトリーブ先計算用)。"""
         return self._points(anchor, tension, rod_flex, length,
-                            segments, target, 0.0)[-1]
+                            segments, target, 0.0, bend_floor)[-1]
 
     def draw(
         self,
@@ -204,6 +232,7 @@ class RodController:
         segments: int = 6,
         target: Optional[Tuple[int, int]] = None,
         shake: float = 0.0,
+        bend_floor: float = 0.0,
     ) -> Tuple[int, int]:
         """ロッドを折れ線で動的描画し、ティップ座標を返す。
 
@@ -211,9 +240,10 @@ class RodController:
         tension : 0.0〜1.0 ラインテンション → 曲がり量
         target  : 引っ張られる先 (ルアー/魚の画面座標)。None なら従来の固定方向
         shake   : 振動振幅 (px)。高テンション警告でロッドが震える
+        bend_floor: ファイト中の常時荷重 (0..1)。竿先が常に魚方向へ引かれる
         """
         pts = self._points(anchor, tension, rod_flex, length,
-                           segments, target, shake)
+                           segments, target, shake, bend_floor)
 
         # ロッド本体 (グリップ側を太く)
         for i in range(len(pts) - 1):

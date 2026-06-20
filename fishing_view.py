@@ -11,7 +11,8 @@ import pygame
 
 from constants import (
     SCREEN_W, SCREEN_H, UW_SIZE,
-    FS_IDLE, FS_CAST_CHARGE, FS_CASTING, FS_RETRIEVE, FS_BITE, FS_FIGHT,
+    FS_IDLE, FS_CAST_CHARGE, FS_CASTING, FS_RETRIEVE, FS_BITE,
+    FS_WEIGHT, FS_LINE_RUN, FS_FIGHT,
     FS_KEEP_RELEASE, FS_RESULT,
     CAST_PERFECT, CAST_GOOD, CAST_EARLY, CAST_LATE,
     HOOKSET_DELAY, HOOKSET_AUTO, HOOKSET_HYBRID, HOOKSET_VISUAL_DELAY,
@@ -31,7 +32,9 @@ from spot_templates import SPOT_CONFIGS, DEFAULT_CONFIG
 from underwater_map import UnderwaterMap
 from fish import Fish
 from lure import Lure
-from lure_catalog import LURE_CATALOG, get_spec_by_idx
+from lure_catalog import (
+    LURE_CATALOG, get_spec_by_idx, optimal_slack_range, slack_modifier,
+)
 from save_manager import SaveManager
 from environment import Environment
 from fish_population import FishPopulationManager, FishIndividual
@@ -306,10 +309,16 @@ class FishingView:
         self._bite_type: str = ""            # BITE_* (演出種別)
         self._bite_elapsed: int = 0          # バイトキューからの経過フレーム
         self._weight_on_frame: int = 0       # VISUAL_DELAY: 重みが乗るフレーム
+        # Hooking v1: ワーム系 WEIGHT/LINE_RUN 工程
+        self._bite_fish: Optional[Fish] = None        # バイト中の魚 (LINE_RUNで走らせる)
+        self._line_run_dir: Tuple[float, float] = (0.0, -1.0)  # ライン走行方向 (沖向き)
         # イベント駆動バイト用トラッキング
         self._prev_lure_cell: Tuple[int, int] = (-1, -1)
         self._was_in_range: bool = False
         self._bite_event_cd: int = 0         # イベント発火クールダウン残f
+        # Beta v0.96: バイト成立時の slack_m と適正度 (フッキング品質に反映)
+        self._bite_slack: float = 0.0
+        self._bite_slack_mod: float = 1.0
 
         # ファイト
         self.fight: Optional[FightState] = None
@@ -334,7 +343,7 @@ class FishingView:
         self._terrain_surf: Optional[pygame.Surface] = None
         self._score_surf:   Optional[pygame.Surface] = None
         self._struct_surf:  Optional[pygame.Surface] = None  # フィールド内ストラクチャー
-        self._gauge_surf:   Optional[pygame.Surface] = None  # テンションゲージ(細グラデ)
+        self._vgauge_surf:  Optional[pygame.Surface] = None  # テンションゲージ(縦グラデ)
 
         # V5: 軽量水面パーティクル (波紋/スプラッシュ/しぶき)
         self._particles: list = []
@@ -348,7 +357,7 @@ class FishingView:
         self._build_terrain_surf()
         self._build_score_surf()
         self._build_field_struct_surf()
-        self._build_gauge_surf()
+        self._build_vgauge_surf()
 
     def _build_terrain_surf(self) -> None:
         surf = pygame.Surface((UW_SIZE * CELL_PX, UW_SIZE * CELL_PX))
@@ -379,19 +388,21 @@ class FishingView:
                                  (cx*CELL_PX, cy*CELL_PX, CELL_PX-1, CELL_PX-1))
         self._score_surf = surf
 
-    # ゲージ幅 (パネル幅 PW=700 - 余白)。_build_gauge_surf と描画で共有
-    _GAUGE_W = 672
-    _GAUGE_H = 12
+    # 縦型テンションゲージ (画面右側)。下=SLACK(青) 上=DANGER(赤)。
+    _VGAUGE_W = 22
+    _VGAUGE_H = 300
+    _VGAUGE_X = MAIN_W - 50
+    _VGAUGE_Y = 200
 
-    def _build_gauge_surf(self) -> None:
-        """テンションゲージの細い横長グラデーションを事前生成 (青→緑→黄→赤)。
+    def _build_vgauge_surf(self) -> None:
+        """テンションゲージの縦グラデーションを事前生成 (下:青→上:赤)。
 
-        mockup v002 準拠。色は zone 境界 (T_BLUE/T_GREEN/T_YELLOW) を
-        アンカーに滑らかに補間する。補助情報なので主張は控えめ。
+        色は zone 境界 (T_BLUE/T_GREEN/T_YELLOW) をアンカーに滑らかに補間する。
+        下端 = テンション0 (SLACK)、上端 = テンション1 (DANGER)。
         """
-        W, H = self._GAUGE_W, self._GAUGE_H
+        W, H = self._VGAUGE_W, self._VGAUGE_H
         surf = pygame.Surface((W, H))
-        # (位置, RGB) のアンカー。位置は 0..1
+        # (テンション位置 0..1, RGB) のアンカー。
         stops = [
             (0.00, (40,  90, 200)),   # SLACK 濃い青
             (T_BLUE, (60, 130, 220)),  # 青
@@ -403,8 +414,8 @@ class FishingView:
         ]
         def lerp(a, b, t):
             return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
-        for x in range(W):
-            v = x / (W - 1)
+        for yy in range(H):
+            v = 1.0 - yy / (H - 1)   # 上端=1(DANGER) 下端=0(SLACK)
             for i in range(len(stops) - 1):
                 p0, c0 = stops[i]
                 p1, c1 = stops[i + 1]
@@ -414,8 +425,8 @@ class FishingView:
                     break
             else:
                 col = stops[-1][1]
-            pygame.draw.line(surf, col, (x, 0), (x, H))
-        self._gauge_surf = surf
+            pygame.draw.line(surf, col, (0, yy), (W, yy))
+        self._vgauge_surf = surf
 
     def _build_field_struct_surf(self) -> None:
         """釣りビュー内のストラクチャー描画 (常時表示) を事前生成する。
@@ -582,7 +593,8 @@ class FishingView:
 
         # ── キー入力 ──────────────────────────────────────────────────
         if event.type == pygame.KEYDOWN:
-            if self.state == FS_BITE and event.key in (pygame.K_DOWN, pygame.K_SPACE):
+            if (self.state in (FS_BITE, FS_WEIGHT, FS_LINE_RUN)
+                    and event.key in (pygame.K_DOWN, pygame.K_SPACE)):
                 # ↓ = フッキング (SPACE は補助として残す)
                 self._attempt_hookset()
             elif event.key == pygame.K_k and self.state == FS_KEEP_RELEASE:
@@ -711,16 +723,10 @@ class FishingView:
             self._update_retrieve()
 
         elif self.state == FS_BITE:
-            self._bite_elapsed += 1
-            for fish in self.fishes:
-                if fish.state not in (FISH_CAUGHT, REACT_BITE):
-                    fish.update(self.lure)
-            # モード別タイムアウト
-            if self._bite_mode == HOOKSET_VISUAL_DELAY:
-                if self._bite_elapsed > self._weight_on_frame + TU.TOPWATER_TIMEOUT_AFTER:
-                    self._miss_bite()
-            elif self._bite_elapsed > _BITE_TIMEOUT.get(self._bite_mode, BITE_FRAMES):
-                self._miss_bite()
+            self._update_bite()
+
+        elif self.state in (FS_WEIGHT, FS_LINE_RUN):
+            self._update_worm_bite()
 
         elif self.state == FS_FIGHT:
             self._update_fight()
@@ -909,7 +915,10 @@ class FishingView:
                     and in_range_fish and in_range_fish.size >= 40.0)
                 else 1.0
             )
-            modifier = act_mod * lure_mod * mem_mod * cast_mod
+            # Beta v0.96: スラック適合度。適正スラックで使えているほど食う。
+            # → worm/jig はフォール(スラック)で、hard_bait は張りで最大化する。
+            slack_mod = self._slack_modifier()
+            modifier = act_mod * lure_mod * mem_mod * cast_mod * slack_mod
 
             # ── トリガーイベント検出 ──
             event = None
@@ -1087,6 +1096,58 @@ class FishingView:
 
     # ── Bite / hookset / miss ─────────────────────────────────────────
 
+    def _update_bite(self) -> None:
+        """巻物/その他: BITE 中の経過とタイムアウト判定。"""
+        self._bite_elapsed += 1
+        for fish in self.fishes:
+            if fish.state not in (FISH_CAUGHT, REACT_BITE):
+                fish.update(self.lure)
+        # モード別タイムアウト
+        if self._bite_mode == HOOKSET_VISUAL_DELAY:
+            if self._bite_elapsed > self._weight_on_frame + TU.TOPWATER_TIMEOUT_AFTER:
+                self._miss_bite()
+        elif self._bite_elapsed > _BITE_TIMEOUT.get(self._bite_mode, BITE_FRAMES):
+            self._miss_bite()
+
+    def _update_worm_bite(self) -> None:
+        """Hooking v1: ワーム系 WEIGHT → LINE_RUN 工程の進行。
+
+        WEIGHT  : 重みが乗る (ティップが少し入る / ラインが張る)。
+        LINE_RUN: 魚が走り出し、魚+ルアーが沖へ動く (ライン角度が変化)。
+        どちらの状態でも↓入力で HOOK でき、品質は _bite_elapsed で判定する。
+        """
+        self._bite_elapsed += 1
+        for fish in self.fishes:
+            if fish.state not in (FISH_CAUGHT, REACT_BITE):
+                fish.update(self.lure)
+
+        if self.state == FS_WEIGHT:
+            # ラインが張る: スラックが抜けていき、ティップに重みが乗る
+            self.lure.slack = max(0.0, self.lure.slack - 0.05)
+            # 重みが乗りきると魚が走り出す → LINE_RUN へ
+            if self._bite_elapsed >= TU.WORM_WEIGHT_TO_RUN:
+                self.state = FS_LINE_RUN
+                self.lure.slack = 0.0
+        else:  # FS_LINE_RUN: 魚+ルアーを走らせてライン角度を変える
+            self._advance_line_run()
+
+        # ワーム系は DELAY のタイムアウトで見切られる
+        if self._bite_elapsed > _BITE_TIMEOUT.get(self._bite_mode, BITE_FRAMES):
+            self._miss_bite()
+
+    def _advance_line_run(self) -> None:
+        """LINE_RUN中: バイト魚とルアーを走行方向へ動かす (ライン角度が変化する)。"""
+        dx, dy = self._line_run_dir
+        spd = TU.WORM_LINE_RUN_SPEED
+        if self._bite_fish is not None:
+            self._bite_fish.x = max(0.0, min(float(UW_SIZE - 1),
+                                             self._bite_fish.x + dx * spd))
+            self._bite_fish.y = max(0.0, min(float(UW_SIZE - 1),
+                                             self._bite_fish.y + dy * spd))
+            # ルアーは魚に咥えられたまま追従 → ティップ→ルアーのラインが魚方向へ走る
+            self.lure.x = self._bite_fish.x
+            self.lure.y = self._bite_fish.y
+
     def _trigger_bite(self) -> None:
         """バイト発生: ルアー別フッキング方式に応じて分岐。"""
         biting = min(
@@ -1098,7 +1159,12 @@ class FishingView:
             return
 
         biting.trigger_bite()
+        self._bite_fish = biting
         self._bite_charge = 0.0
+        # Beta v0.96: バイト成立時のスラックを記録 → フッキング品質(hook_hold)に反映。
+        # 適正スラックで掛ければテンション伝達が良く、保持率が高い。
+        self._bite_slack = self.lure.slack_m
+        self._bite_slack_mod = self._slack_modifier()
         # ルアーは水中に残す: ラインが張られたままティップが引き込まれる
         # (リトリーブ→バイトをシームレスに見せる)
         self._intended_pos = None
@@ -1118,7 +1184,16 @@ class FishingView:
             # 水中バイト: 控えめな波紋
             self._spawn_ripple(bsx, bsy, rings=1)
 
-        self.state = FS_BITE
+        # Hooking v1: ワーム系 (DELAYフッキング) は BITE→WEIGHT→LINE_RUN→HOOK。
+        # 巻物/その他は従来通り BITE→HOOK。
+        if self._bite_mode == HOOKSET_DELAY:
+            # 走る方向: アンカー(立ち位置)から沖へ + 開けた側へ少し横走り
+            ax = self.player_stance_x * (UW_SIZE - 1)
+            side = -1.0 if biting.x < ax else 1.0
+            self._line_run_dir = (side * 0.55, -0.83)   # 沖向き(手前→奥) 主体
+            self.state = FS_WEIGHT
+        else:
+            self.state = FS_BITE
 
     def _hookset_quality(self) -> Optional[str]:
         """↓入力タイミングからフック品質を返す (None = すっぽ抜け)。
@@ -1178,6 +1253,7 @@ class FishingView:
         # V5: フッキング成功の水しぶき
         self._spawn_splash(hook_sx, hook_sy, n=10, power=1.1)
         self.lure.reset()   # ここでルアー回収 (バイト中は水中に残している)
+        self._bite_fish = None
         caught = next((f for f in self.fishes if f.state == REACT_BITE), None)
         if not caught:
             self.state         = FS_RESULT
@@ -1208,9 +1284,21 @@ class FishingView:
                 meters_per_cell=TU.FIGHT_METERS_PER_CELL,
                 legend=legend,
             )
+            # Beta v0.96: スラック適合度を初期 hook_hold に乗せる。適正スラックで
+            # 掛ければ満点、外れて掛けると保持率が落ち、魚を止めにくくなる。
+            hold_mult = (TU.FIGHT_SLACK_HOOKHOLD_FLOOR
+                         + (1.0 - TU.FIGHT_SLACK_HOOKHOLD_FLOOR) * self._bite_slack_mod)
+            self.fight.hook_hold *= hold_mult
+            self.fight._hook_hold_max = self.fight.hook_hold
+            # Hooking v1: RUN_START — フック直後の最初の突っ走り。サイズ別に
+            # line_out_m を一気に増やしてからファイトへ入る。
+            run_m = self.fight.apply_run_start()
+            caught.x, caught.y = self.fight.fish_x, self.fight.fish_y
             self._fight_start_dist = self.fight.line_length_m
             self._fight_fish = caught
             self._fight_events.append((f"HOOKED! [{quality}]", 80))
+            if run_m >= 4.0:
+                self._fight_events.append(("LINE OUT!", 70))
             self.rod.reset()
             self.state = FS_FIGHT
             return
@@ -1322,6 +1410,7 @@ class FishingView:
         self.rod.reset()    # すっぽ抜け後: ロッドを中立へ戻す
         self.state        = FS_IDLE
         self._bite_charge = 0.0
+        self._bite_fish   = None
 
     # ── Phase 10: Keep / Release ──────────────────────────────────────
 
@@ -1447,6 +1536,15 @@ class FishingView:
         """現在のルアーのカテゴリ名を返す。"""
         spec = get_spec_by_idx(self._lure_idx)
         return getattr(spec, "lure_category", "hard_bait")
+
+    def _slack_modifier(self) -> float:
+        """Beta v0.96: 現在の slack_m がルアー適正レンジにどれだけ合うか。
+
+        適正=1.0 / やや外れ=0.7 / 大きく外れ=0.3。バイト確率に乗る。
+        hard_bait は張って(低スラック)、soft/bottom はフォール(高スラック)で 1.0。
+        """
+        spec = get_spec_by_idx(self._lure_idx)
+        return slack_modifier(self.lure.slack_m, optimal_slack_range(spec))
 
     def _current_game_day(self) -> int:
         """現在のゲーム内日数を返す (SaveManager から)。"""
@@ -1620,6 +1718,10 @@ class FishingView:
         # ── Beta v0.9: Bite cue (ルアー別アタリ演出) ──────────────────
         if self.state == FS_BITE and self.font_lg and self.font:
             self._draw_bite_cue(surface)
+
+        # ── Hooking v1: ワーム系 WEIGHT / LINE_RUN キュー ─────────────
+        if self.state in (FS_WEIGHT, FS_LINE_RUN) and self.font_lg and self.font:
+            self._draw_worm_bite_cue(surface)
 
         # ── Beta v0.9: Fight scene (魚マーカー・ライン) ────────────────
         if self.state == FS_FIGHT and self.fight:
@@ -1908,6 +2010,26 @@ class FishingView:
                 cs = f.render("!", True, col)
                 surface.blit(cs, (self.rod_anchor[0] - 50, SCREEN_H - 170))
 
+    def _draw_worm_bite_cue(self, surface: pygame.Surface) -> None:
+        """Hooking v1: ワーム系のバイト工程キュー。
+
+        WEIGHT  : "weight..." (重みが乗る = まだ送り込む)
+        LINE_RUN: "LINE RUN!" + 走行点の点滅 (合わせの好機)
+        """
+        if self.state == FS_WEIGHT:
+            if (self._bite_elapsed // 14) % 2 == 0:
+                ts = self.font.render("weight...", True, (255, 220, 120))
+                surface.blit(ts, (self.rod_anchor[0] - 60, SCREEN_H - 170))
+        else:  # FS_LINE_RUN
+            if (self._bite_elapsed // 6) % 2 == 0 and self.font_lg:
+                ts = self.font_lg.render("LINE RUN!", True, (255, 120, 60))
+                surface.blit(ts, (self.rod_anchor[0] - 70, SCREEN_H - 185))
+            # 走っているルアー位置に赤マーカー (ライン角度の変化を強調)
+            if self.lure.in_water:
+                lx, ly = self._uw_to_screen(self.lure.x, self.lure.y)
+                if 0 <= lx < MAIN_W:
+                    pygame.draw.circle(surface, (255, 80, 60), (lx, ly), 6, 2)
+
     def _rod_tension_visual(self) -> float:
         """描画用テンション値 (状態に応じて算出)。"""
         if self.state == FS_FIGHT and self.fight:
@@ -1915,6 +2037,16 @@ class FishingView:
         if self.state == FS_CAST_CHARGE:
             # 振りかぶり: 溜めに応じて後方へしなる表現の代用
             return min(1.0, self._cast_charge / 100.0) * 0.5
+        if self.state == FS_WEIGHT:
+            # Hooking v1: 重みが乗る → ティップが少し入り、ラインが張っていく
+            t = self._bite_elapsed
+            ramp = min(1.0, t / max(1, TU.WORM_WEIGHT_TO_RUN))
+            pulse = max(0.0, math.sin(t * 0.30)) ** 3
+            return 0.10 + 0.18 * ramp + 0.10 * pulse
+        if self.state == FS_LINE_RUN:
+            # Hooking v1: 魚が走る → ラインが強く張り、竿先が魚方向へ入り続ける
+            t = self._bite_elapsed
+            return 0.40 + 0.12 * abs(math.sin(t * 0.18))
         if self.state == FS_BITE:
             # アタリ: 竿先が引き込まれる。ルアー別に引っ張りの強さ・リズムが違う
             t = self._bite_elapsed
@@ -1972,11 +2104,15 @@ class FishingView:
         target: Optional[Tuple[int, int]] = None
         shake = 0.0
         rod_flex = 1.0
+        bend_floor = 0.0
         if self.state == FS_FIGHT and self.fight:
             target = self._fight_fish_screen_pos()
             f = self.fight
             # 大物ほど深く胴に入る (40cm:1.0 → 65cm:1.45)。ロッドを見れば大きさが分かる
             rod_flex = 1.0 + max(0.0, (f.fish_size - 40.0)) * 0.018
+            # v0.96: ファイト中は常に魚に引かれている → テンションが抜けても竿先が
+            # 魚方向へ入ったままになるよう曲げの下限を与える。大物ほど深く入る。
+            bend_floor = TU.ROD_FIGHT_BEND_FLOOR + max(0.0, (f.fish_size - 40.0)) * 0.006
             # 高テンション警告: REDに入るほど・ライン負荷が溜まるほど激しく震える
             if f.tension > T_YELLOW:
                 over = (f.tension - T_YELLOW) / (1.0 - T_YELLOW)
@@ -1984,7 +2120,8 @@ class FishingView:
         elif self.lure.in_water:
             target = self._uw_to_screen(self.lure.x, self.lure.y)
         tip = self.rod.draw(surface, self.rod_anchor, tension, rod_flex=rod_flex,
-                            length=TU.ROD_VISUAL_LENGTH, target=target, shake=shake)
+                            length=TU.ROD_VISUAL_LENGTH, target=target, shake=shake,
+                            bend_floor=bend_floor)
 
         # ライン: ティップ → ルアー (リトリーブ中) / 魚 (ファイト中)
         line_col = (210, 220, 235)
@@ -2049,13 +2186,14 @@ class FishingView:
         fxp, fyp = fish
 
         if z == "BLUE":
-            # たるみ: テンションが低いほど大きく垂れる (2次ベジェ)
+            # v0.96: たるみは「軽い垂れ」に留める。竿先→魚は基本まっすぐで、
+            # テンションが抜けてもラインが不自然に大きく垂れない (やり取り感重視)。
             slack = (T_GREEN - f.tension) / T_GREEN   # 0..1
             mx = (tx + fxp) * 0.5
-            my = (ty + fyp) * 0.5 + 20 + 70 * max(0.0, slack)
+            my = (ty + fyp) * 0.5 + 8 + 24 * max(0.0, slack)
             pts = []
-            for i in range(15):
-                t = i / 14.0
+            for i in range(13):
+                t = i / 12.0
                 bx = (1-t)**2 * tx + 2*(1-t)*t * mx + t*t * fxp
                 by = (1-t)**2 * ty + 2*(1-t)*t * my + t*t * fyp
                 pts.append((int(bx), int(by)))
@@ -2155,25 +2293,93 @@ class FishingView:
                 pygame.draw.rect(surface, (80, 255, 120),
                                  (MAIN_W // 2 - 90, 372, pw, 10))
 
+    def _draw_tension_gauge_v(self, surface: pygame.Surface, f) -> None:
+        """画面右側の縦型テンションゲージ (色 + 白マーカーのみ)。
+
+        下=青(SLACK), 中=緑(SAFE), 上=黄〜赤(DANGER)。ラベルや大きな文字は
+        付けず、現在テンション位置に小さな白マーカーだけを置く。ロッド (中央)
+        とは被らない右端に配置する。
+        """
+        VW, VH = self._VGAUGE_W, self._VGAUGE_H
+        VX, VY = self._VGAUGE_X, self._VGAUGE_Y
+        if self._vgauge_surf is not None:
+            surface.blit(self._vgauge_surf, (VX, VY))
+        pygame.draw.rect(surface, (40, 40, 48), (VX, VY, VW, VH), 2)
+        # 現在テンション位置の白マーカー (横線 + 左側の小三角)
+        t = max(0.0, min(1.0, f.tension))
+        my = VY + int(VH * (1.0 - t))
+        pygame.draw.line(surface, C_WHITE, (VX - 3, my), (VX + VW + 3, my), 3)
+        pygame.draw.polygon(surface, C_WHITE,
+                            [(VX - 5, my), (VX - 13, my - 6), (VX - 13, my + 6)])
+
     def _draw_fight_panel(self, surface: pygame.Surface) -> None:
-        """ファイト用下部パネル: テンションゲージ (青→緑→黄→赤) + 距離。"""
+        """ファイト表示: 右側に縦型テンションゲージ + 上部の細い情報ストリップ。
+
+        旧・下部横長ゲージはロッドと被るため廃止。テンションは右側の縦ゲージで
+        示し、テキストはロッドを隠さない上部に薄く置く。
+        """
         if not self.font or not self.font_sm:
             return
         f = self.fight
         if not f:
             return
 
-        PX, PY, PW, PH = 6, 560, 700, 130
-        bg = pygame.Surface((PW, PH), pygame.SRCALPHA)
-        bg.fill((0, 0, 0, 185))
-        surface.blit(bg, (PX, PY))
-        pygame.draw.rect(surface, (60, 60, 60), (PX, PY, PW, PH), 1)
+        # ── 右側: 縦型テンションゲージ ──────────────────────────────
+        self._draw_tension_gauge_v(surface, f)
 
-        surface.blit(self.font.render("FIGHT!", True, (255, 120, 60)), (PX + 10, PY + 6))
-        dist_s = self.font.render(f"Line out: {f.line_length_m:.1f} m", True, C_WHITE)
-        surface.blit(dist_s, (PX + 130, PY + 8))
-        hq = self.font_sm.render(f"Hook: {f.hook_quality}", True, C_GRAY)
-        surface.blit(hq, (PX + 340, PY + 12))
+        # ── 上部: 細い情報ストリップ (ロッドを隠さない位置) ──────────
+        SX, SY, SW, SH = 6, 150, 560, 48
+        bg = pygame.Surface((SW, SH), pygame.SRCALPHA)
+        bg.fill((0, 0, 0, 160))
+        surface.blit(bg, (SX, SY))
+        pygame.draw.rect(surface, (60, 60, 60), (SX, SY, SW, SH), 1)
+
+        surface.blit(self.font.render("FIGHT!", True, (255, 120, 60)), (SX + 8, SY + 4))
+        surface.blit(
+            self.font.render(f"Line out: {f.line_length_m:.1f} m", True, C_WHITE),
+            (SX + 110, SY + 4))
+        surface.blit(self.font_sm.render(f"Hook: {f.hook_quality}", True, C_GRAY),
+                     (SX + 330, SY + 8))
+
+        # 状況ヒント (1行)
+        zone = f.zone
+        if zone == "BLUE":
+            hint = "Too slack! reel or rod DOWN"
+        elif zone == "RED":
+            hint = "DANGER! stop reeling / rod UP!"
+        elif f.pumping:
+            hint = "PUMP! reeling in fast"
+        elif f.control_success:
+            hint = "Good! rod against the fish"
+        elif f.behavior == "RUN":
+            hint = "Fish running - steer opposite"
+        elif f.pump_charge > 0.0:
+            hint = "Now rod UP + REEL to pump in!"
+        elif f.distance <= LANDING_DIST_M:
+            hint = "Hold DOWN to land the fish!"
+        elif f.fish_size >= 45.0:
+            hint = "Rod DOWN to load, then UP + REEL (pump)"
+        else:
+            hint = "Reel to gain line / arrows to steer"
+        surface.blit(self.font_sm.render(hint, True, (210, 210, 210)), (SX + 8, SY + 26))
+
+        # ── ポンピング charge バー (溜まっている時のみ) ─────────────────
+        if f.pump_charge > 0.01 or f.pumping:
+            pcw = int(120 * min(1.0, f.pump_charge))
+            bx, by = SX + 430, SY + 30
+            pygame.draw.rect(surface, (40, 40, 40), (bx, by, 120, 8))
+            col = (120, 220, 255) if f.pumping else (90, 160, 210)
+            pygame.draw.rect(surface, col, (bx, by, pcw, 8))
+            surface.blit(self.font_sm.render("PUMP", True, col), (bx, by - 14))
+
+        # 巻き時インジケータ: 縦ゲージの上に点滅表示
+        if (zone in ("GREEN", "YELLOW") and f.behavior != "RUN"
+                and f.distance > LANDING_DIST_M):
+            on = (self._frame_count % 40) < 26
+            rc = (90, 255, 130) if on else (50, 150, 80)
+            rs = self.font_sm.render("REEL NOW!", True, rc)
+            surface.blit(rs, (self._VGAUGE_X + self._VGAUGE_W // 2 - rs.get_width() // 2,
+                              self._VGAUGE_Y - 22))
 
         # デバッグ: フックホールド / 魚の体力 / ライン負荷の内部値
         if self.debug_mode:
@@ -2184,69 +2390,7 @@ class FishingView:
                 f"stress {f._line_stress:.0f}/{TU.FIGHT_LINE_BREAK_STRESS:.0f}   "
                 f"{ctrl}",
                 True, (255, 200, 80))
-            surface.blit(dbg, (PX + 460, PY + 12))
-
-        # ── テンションゲージ (細い横長グラデ; 補助情報) ──────────────
-        GX, GY, GW, GH = PX + 14, PY + 58, self._GAUGE_W, self._GAUGE_H
-        def zx(v: float) -> int:
-            return GX + int(GW * v)
-        # SLACK / SAFE / DANGER ラベル (mockup 準拠)
-        self.font_sm and surface.blit(
-            self.font_sm.render("SLACK", True, (110, 150, 220)), (GX, GY - 18))
-        if self.font_sm:
-            sa = self.font_sm.render("SAFE", True, (90, 210, 110))
-            surface.blit(sa, (zx((T_BLUE + T_GREEN) / 2) - sa.get_width() // 2, GY - 18))
-            dg = self.font_sm.render("DANGER", True, (240, 90, 70))
-            surface.blit(dg, (GX + GW - dg.get_width(), GY - 18))
-        # グラデバー本体 (キャッシュ済み)
-        if self._gauge_surf is not None:
-            surface.blit(self._gauge_surf, (GX, GY))
-        pygame.draw.rect(surface, (90, 90, 100), (GX, GY, GW, GH), 1)
-        # ゾーン境界の薄い目盛り
-        for b in (T_BLUE, T_GREEN, T_YELLOW):
-            pygame.draw.line(surface, (20, 20, 25), (zx(b), GY), (zx(b), GY + GH), 1)
-        # 現在テンションのポインタ (上から下りる細い三角)
-        mx = zx(max(0.0, min(1.0, f.tension)))
-        pygame.draw.polygon(surface, C_WHITE,
-                            [(mx, GY - 2), (mx - 5, GY - 11), (mx + 5, GY - 11)])
-        pygame.draw.line(surface, C_WHITE, (mx, GY - 2), (mx, GY + GH + 2), 2)
-
-        # ゾーンラベル
-        zone = f.zone
-        zone_col = {
-            "BLUE":   (110, 160, 255),
-            "GREEN":  ( 90, 230, 120),
-            "YELLOW": (240, 210,  70),
-            "RED":    (255,  90,  60),
-        }[zone]
-        zs = self.font.render(f"TENSION: {zone}", True, zone_col)
-        surface.blit(zs, (GX, GY + GH + 8))
-
-        # 巻き時インジケータ: 安全に巻けるタイミングを明示する
-        if (zone in ("GREEN", "YELLOW") and f.behavior != "RUN"
-                and f.distance > LANDING_DIST_M):
-            on = (self._frame_count % 40) < 26
-            rc = (90, 255, 130) if on else (50, 150, 80)
-            rs = self.font.render("REEL NOW!", True, rc)
-            surface.blit(rs, (GX + GW - rs.get_width() - 6, GY + GH + 8))
-            pygame.draw.circle(surface, rc,
-                               (GX + GW - rs.get_width() - 20, GY + GH + 19), 6)
-
-        # 状況ヒント
-        if zone == "BLUE":
-            hint = "Too slack! Hook may come out - reel or rod DOWN"
-        elif zone == "RED":
-            hint = "DANGER! Stop reeling / rod UP!"
-        elif f.control_success:
-            hint = "Good! Rod against the fish - tiring it out"
-        elif f.behavior == "RUN":
-            hint = "Fish running - steer opposite to control it"
-        elif f.distance <= LANDING_DIST_M:
-            hint = "Hold DOWN to land the fish!"
-        else:
-            hint = "Reel to gain line / arrows to steer"
-        hs = self.font_sm.render(hint, True, (210, 210, 210))
-        surface.blit(hs, (GX + 220, GY + GH + 12))
+            surface.blit(dbg, (SX + 8, SY + SH + 4))
 
     # ── Sidebar ────────────────────────────────────────────────────────
 
@@ -2538,6 +2682,8 @@ class FishingView:
             FS_CAST_CHARGE:  "Release LMB in the GREEN zone!",
             FS_RETRIEVE:     "LMB:Reel (tap=creep, mash=fast)  Arrows:Rod (v=twitch/lift ^=fall <>=steer)",
             FS_BITE:         "> Press DOWN to hookset!",
+            FS_WEIGHT:       "> Weight loading... feel the tip, then set!",
+            FS_LINE_RUN:     "> LINE RUNNING — Press DOWN to hookset!",
             FS_FIGHT:        "Arrows: rod control  LMB: reel  |  manage tension!",
             FS_KEEP_RELEASE: "[K] KEEP  /  [R] RELEASE",
             FS_RESULT:       "",
