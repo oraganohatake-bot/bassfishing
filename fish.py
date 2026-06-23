@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     from fish_population import FishIndividual
 
 from constants import (
-    UW_SIZE,
+    UW_SIZE, UW_W, UW_H,
     REACT_IGNORE, REACT_NOTICE, REACT_APPROACH,
     REACT_CHASE, REACT_BITE, REACT_SPOOK, FISH_CAUGHT,
 )
@@ -109,8 +109,8 @@ class Fish:
     @property
     def preferred_depth(self) -> float:
         """Depth of the cell the fish currently occupies."""
-        cx = max(0, min(UW_SIZE - 1, int(self.x)))
-        cy = max(0, min(UW_SIZE - 1, int(self.y)))
+        cx = max(0, min(UW_W - 1, int(self.x)))
+        cy = max(0, min(UW_H - 1, int(self.y)))
         return self._map.cell(cx, cy).depth
 
     def update(self, lure, cell_pressure: int = 0) -> Optional[str]:
@@ -281,8 +281,8 @@ class Fish:
         nx = self.x + (dx / dist) * 8
         ny = self.y + (dy / dist) * 8
         self._spook_target = (
-            max(1, min(UW_SIZE - 2, int(nx))),
-            max(1, min(UW_SIZE - 2, int(ny))),
+            max(1, min(UW_W - 2, int(nx))),
+            max(1, min(UW_H - 2, int(ny))),
         )
 
     def _do_spook_no_lure(self) -> None:
@@ -290,8 +290,8 @@ class Fish:
         self._spook_timer = SPOOK_FRAMES
         # Pick a random retreat point
         self._spook_target = (
-            self._rng.randint(1, UW_SIZE - 2),
-            self._rng.randint(1, UW_SIZE - 2),
+            self._rng.randint(1, UW_W - 2),
+            self._rng.randint(1, UW_H - 2),
         )
 
     def _update_spook(self, lure) -> None:
@@ -318,7 +318,7 @@ class Fish:
         for r_dy in range(-7, 8):
             for r_dx in range(-7, 8):
                 nx, ny = bx + r_dx, by + r_dy
-                if 0 <= nx < UW_SIZE and 0 <= ny < UW_SIZE:
+                if 0 <= nx < UW_W and 0 <= ny < UW_H:
                     s = self._map.full_score(nx, ny)
                     if s > best_score:
                         best_score = s
@@ -326,5 +326,5 @@ class Fish:
         self._patrol_target = target
 
     def _clamp(self) -> None:
-        self.x = max(0.0, min(float(UW_SIZE - 1), self.x))
-        self.y = max(0.0, min(float(UW_SIZE - 1), self.y))
+        self.x = max(0.0, min(float(UW_W - 1), self.x))
+        self.y = max(0.0, min(float(UW_H - 1), self.y))

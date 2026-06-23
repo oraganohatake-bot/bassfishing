@@ -18,7 +18,7 @@ from __future__ import annotations
 from typing import Optional
 
 from constants import (
-    UW_SIZE,
+    UW_SIZE, UW_W, UW_H,
     ACTION_IDLE, ACTION_RETRIEVE, ACTION_STOP,
     ACTION_TWITCH, ACTION_LIFT, ACTION_FALL,
 )
@@ -50,7 +50,7 @@ class Lure:
       all others  → standard per-action depth physics
     """
 
-    PLAYER_Y = float(UW_SIZE - 1)
+    PLAYER_Y = float(UW_H - 1)
 
     def __init__(self, lure_type: str = "Minnow") -> None:
         self.lure_type: str = lure_type
@@ -244,7 +244,7 @@ class Lure:
                 progress = 1.0
             self._base_x = start_x + (anchor_x - start_x) * progress
 
-        self.x = max(0.0, min(float(UW_SIZE - 1), self._base_x + self._steer_off))
+        self.x = max(0.0, min(float(UW_W - 1), self._base_x + self._steer_off))
 
         # ── Topwater: keep lure at surface ──
         if self.lure_type == "Topwater":

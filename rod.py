@@ -187,7 +187,19 @@ class RodController:
             bend_angle = max(-max_bend, min(max_bend, diff)) * bend_total
         else:
             bend_angle = math.radians(bend_total * 60.0)
-        per_seg_bend = bend_angle / segments
+
+        # ── 荷重依存の曲げプロファイル (ティップの食い込み / バットのしなり) ──
+        # 旧実装は配分が (i+1) 固定 = 荷重で「曲げ量」しか変わらなかった。
+        # ここでは配分の指数 k を荷重で動かし、曲げ"形状"を変える:
+        #   軽荷重 → k 大 = 先端側だけ鋭く曲がる (ファストテーパー / ティップが食い込む)
+        #   大荷重 → k 小 = バット側まで曲がりが降りる (パラボリック / 胴に入る)
+        # 重みは正規化し、BEND_GAIN で全体の曲げ量を従来感に合わせる。
+        K_TIP, K_BUTT = 2.2, 0.7
+        BEND_GAIN = 1.6                       # 総曲げ量の係数 (見た目の曲がり具合)
+        load01 = max(0.0, min(1.0, bend_total))
+        k = K_TIP + (K_BUTT - K_TIP) * load01
+        weights = [((i + 1) / segments) ** k for i in range(segments)]
+        wsum = sum(weights) or 1.0
 
         seg_len = length / segments
         pts = [anchor]
@@ -195,8 +207,8 @@ class RodController:
         a = angle
         ticks = pygame.time.get_ticks()
         for i in range(segments):
-            # 先端側のセグメントほど大きく曲がる (i+1 で重み付け)
-            a += per_seg_bend * (i + 1) * 0.5
+            # 配分は荷重依存プロファイルで決め、合計が bend_angle*GAIN になるよう正規化
+            a += bend_angle * BEND_GAIN * weights[i] / wsum
             x += math.cos(a) * seg_len
             y += math.sin(a) * seg_len
             px, py = x, y
@@ -214,7 +226,7 @@ class RodController:
         tension: float = 0.05,
         rod_flex: float = 1.0,
         length: float = 290.0,
-        segments: int = 6,
+        segments: int = 12,  # Exploration v2: 弧を滑らかに (旧6)
         target: Optional[Tuple[int, int]] = None,
         bend_floor: float = 0.0,
     ) -> Tuple[int, int]:
@@ -229,7 +241,7 @@ class RodController:
         tension: float,
         rod_flex: float = 1.0,
         length: float = 290.0,
-        segments: int = 6,
+        segments: int = 12,  # Exploration v2: 弧を滑らかに (旧6)
         target: Optional[Tuple[int, int]] = None,
         shake: float = 0.0,
         bend_floor: float = 0.0,

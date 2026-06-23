@@ -115,7 +115,15 @@ REACTION_PRIORITY: dict = {
 }
 
 # Underwater map dimensions
+# UW_SIZE: 従来の正方グリッド辺。後方互換のため「奥行き(縦/depth)」の別名として残す。
 UW_SIZE = 32
+
+# Hooking/Exploration v2: 釣りビューを横に広げ、左右移動で探索感を出す。
+#   UW_W = 横(幅)のセル数, UW_H = 奥行き(縦)のセル数。
+#   幅だけを 1.5x にする (奥行きは据え置き)。x軸境界は UW_W、y軸境界は UW_H を使う。
+FISHING_VIEW_WIDTH_SCALE = 1.5            # 釣りビューの横幅倍率 (ここ1箇所で調整)
+UW_H = UW_SIZE                            # 奥行き = 従来どおり 32
+UW_W = int(round(UW_SIZE * FISHING_VIEW_WIDTH_SCALE))  # 幅 = 48 (=32*1.5)
 
 # Colors – fish reaction stages (sidebar dots + status panel)
 C_FISH_NOTICE   = (200, 185,  50)

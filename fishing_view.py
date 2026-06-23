@@ -10,7 +10,7 @@ from typing import Optional, Tuple
 import pygame
 
 from constants import (
-    SCREEN_W, SCREEN_H, UW_SIZE,
+    SCREEN_W, SCREEN_H, UW_SIZE, UW_W, UW_H, FISHING_VIEW_WIDTH_SCALE,
     FS_IDLE, FS_CAST_CHARGE, FS_CASTING, FS_RETRIEVE, FS_BITE,
     FS_WEIGHT, FS_LINE_RUN, FS_FIGHT,
     FS_KEEP_RELEASE, FS_RESULT,
@@ -47,9 +47,17 @@ from fight_system import (
 import tuning as TU
 
 # ── Layout ────────────────────────────────────────────────────────────
-MAIN_W    = 990
+MAIN_W    = 990                 # ビューポート幅 (画面に映る釣りビューの横幅)
 SIDEBAR_X = 990
 SIDEBAR_W = SCREEN_W - SIDEBAR_X
+
+# Exploration v2: 釣りビューの「世界幅」は MAIN_W の 1.5x。
+#   1マスのピクセルサイズは据え置き (= MAIN_W/UW_SIZE) のまま横にセルを増やすので、
+#   見た目スケールは変わらず、岸と水面が実際に横へ広がる。常時 MAIN_W ぶんだけ表示し、
+#   残りはカメラ(cam_x)で左右スクロールして見せる。
+WORLD_W   = int(round(MAIN_W * FISHING_VIEW_WIDTH_SCALE))   # = 1485 (世界の横幅 px)
+CAM_X_MAX = max(0, WORLD_W - MAIN_W)                        # カメラ可動域 [0, 495]
+CAM_FOLLOW = 0.12               # カメラ追従の滑らかさ (lerp係数)
 
 SKY_Y0   = 0
 SKY_Y1   = 210
@@ -245,10 +253,15 @@ class FishingView:
         stance_seed = (hash(spot_name) ^ (seed * 2654435761)) & 0xFFFF
         self.player_stance_x: float = 0.30 + 0.40 * (stance_seed % 1000) / 1000.0
 
+        # Exploration v2: 横スクロールカメラ。player_stance_x(0..1, 世界全幅) を
+        # 中央寄せで追従する。cam_x は世界座標→画面座標のオフセット(px)。
+        self.cam_x: float = 0.0
+        self.cam_x = self._camera_target()   # 初期位置を即合わせ (起動時のスクロール無し)
+
         # キャストカーソル (キャスト前に十字キーで動かす狙い点; セル単位)。
-        # 立ち位置の正面・中距離を初期位置とする。
-        self.cast_cursor_x: float = self.player_stance_x * (UW_SIZE - 1)
-        self.cast_cursor_y: float = (UW_SIZE - 1) * 0.40
+        # 立ち位置の正面・中距離を初期位置とする。x は広がった幅(UW_W)基準。
+        self.cast_cursor_x: float = self.player_stance_x * (UW_W - 1)
+        self.cast_cursor_y: float = (UW_H - 1) * 0.40
 
         rng = random.Random(seed)
         self.uw_map = UnderwaterMap(seed, config=config)
@@ -331,7 +344,7 @@ class FishingView:
         self._result_lost_reason: str = ""
 
         # Pressure grid (runtime, not saved)
-        self._pressure = [[0] * UW_SIZE for _ in range(UW_SIZE)]
+        self._pressure = [[0] * UW_W for _ in range(UW_H)]
 
         # Debug
         self.debug_mode = False
@@ -360,9 +373,9 @@ class FishingView:
         self._build_vgauge_surf()
 
     def _build_terrain_surf(self) -> None:
-        surf = pygame.Surface((UW_SIZE * CELL_PX, UW_SIZE * CELL_PX))
-        for cy in range(UW_SIZE):
-            for cx in range(UW_SIZE):
+        surf = pygame.Surface((UW_W * CELL_PX, UW_H * CELL_PX))
+        for cy in range(UW_H):
+            for cx in range(UW_W):
                 cell = self.uw_map.cell(cx, cy)
                 if cell.terrain == TERRAIN_ROCK:
                     color = C_ROCK_CELL
@@ -380,9 +393,9 @@ class FishingView:
         self._terrain_surf = surf
 
     def _build_score_surf(self) -> None:
-        surf = pygame.Surface((UW_SIZE * CELL_PX, UW_SIZE * CELL_PX))
-        for cy in range(UW_SIZE):
-            for cx in range(UW_SIZE):
+        surf = pygame.Surface((UW_W * CELL_PX, UW_H * CELL_PX))
+        for cy in range(UW_H):
+            for cx in range(UW_W):
                 color = _score_to_heat(self.uw_map.full_score(cx, cy))
                 pygame.draw.rect(surf, color,
                                  (cx*CELL_PX, cy*CELL_PX, CELL_PX-1, CELL_PX-1))
@@ -435,15 +448,18 @@ class FishingView:
         水上: ウィードの穂先・カバーの立ち木/杭・水面を割るロックを
               セル位置から上方向へ描き込む (奥ほど小さく = 簡易パース)。
         """
-        surf = pygame.Surface((MAIN_W, SCREEN_H), pygame.SRCALPHA)
+        # Exploration v2: 世界幅(WORLD_W)で構築し、毎フレーム -cam_x で blit する。
+        # ※ カメラ込みの _uw_to_screen ではなく、カメラ無しの _uw_to_world を使う
+        #    (二重適用の防止)。
+        surf = pygame.Surface((WORLD_W, SCREEN_H), pygame.SRCALPHA)
 
-        for cy in range(UW_SIZE):
-            scale = 0.35 + 0.65 * (cy / (UW_SIZE - 1))   # 奥=小さく 手前=大きく
-            for cx in range(UW_SIZE):
+        for cy in range(UW_H):
+            scale = 0.35 + 0.65 * (cy / (UW_H - 1))   # 奥=小さく 手前=大きく
+            for cx in range(UW_W):
                 cell = self.uw_map.cell(cx, cy)
-                sx, sy = self._uw_to_screen(cx, cy)
-                x0, y0 = self._uw_to_screen(cx - 0.5, cy - 0.5)
-                x1, y1 = self._uw_to_screen(cx + 0.5, cy + 0.5)
+                sx, sy = self._uw_to_world(cx, cy)
+                x0, y0 = self._uw_to_world(cx - 0.5, cy - 0.5)
+                x1, y1 = self._uw_to_world(cx + 0.5, cy + 0.5)
                 w, h = max(2, x1 - x0), max(2, y1 - y0)
                 j = (cx * 73 + cy * 131) % 7   # セル固有の揺らぎ
 
@@ -496,8 +512,8 @@ class FishingView:
         # ── 小型魚: 群集管理 (<40 cm) ────────────────────────────────
         for i, sz in enumerate([22.0, 25.0, 27.0, 30.0, 32.0, 35.0, 38.0]):
             pos = best[i % len(best)]
-            fx  = max(1.0, min(float(UW_SIZE - 2), pos[0] + rng.uniform(-2, 2)))
-            fy  = max(1.0, min(float(UW_SIZE - 2), pos[1] + rng.uniform(-2, 2)))
+            fx  = max(1.0, min(float(UW_W - 2), pos[0] + rng.uniform(-2, 2)))
+            fy  = max(1.0, min(float(UW_H - 2), pos[1] + rng.uniform(-2, 2)))
             fish = Fish(fx, fy, sz, self.uw_map, rng)
             fish.activity = max(0.20, min(1.0, fish.activity * act_mod))
             fishes.append(fish)
@@ -508,8 +524,8 @@ class FishingView:
             individuals = self._population.get_spot_individuals(self.spot_name)
             for j, fi in enumerate(individuals):
                 pos = best[(3 + j) % len(best)]   # 小型魚ポジションとずらす
-                fx  = max(1.0, min(float(UW_SIZE - 2), pos[0] + rng.uniform(-3, 3)))
-                fy  = max(1.0, min(float(UW_SIZE - 2), pos[1] + rng.uniform(-3, 3)))
+                fx  = max(1.0, min(float(UW_W - 2), pos[0] + rng.uniform(-3, 3)))
+                fy  = max(1.0, min(float(UW_H - 2), pos[1] + rng.uniform(-3, 3)))
                 fish = Fish(fx, fy, fi.length, self.uw_map, rng)
                 # aggression を activity ベースに使用; caution は spook 感度に反映済
                 fish.activity = max(0.20, min(1.0, fi.aggression * act_mod))
@@ -519,8 +535,8 @@ class FishingView:
             # フォールバック: population 未接続時は固定サイズで生成
             for i, sz in enumerate([40.0, 43.0, 45.0, 48.0]):
                 pos = best[(3 + i) % len(best)]
-                fx  = max(1.0, min(float(UW_SIZE - 2), pos[0] + rng.uniform(-2, 2)))
-                fy  = max(1.0, min(float(UW_SIZE - 2), pos[1] + rng.uniform(-2, 2)))
+                fx  = max(1.0, min(float(UW_W - 2), pos[0] + rng.uniform(-2, 2)))
+                fy  = max(1.0, min(float(UW_H - 2), pos[1] + rng.uniform(-2, 2)))
                 fish = Fish(fx, fy, sz, self.uw_map, rng)
                 fish.activity = max(0.20, min(1.0, fish.activity * act_mod))
                 fishes.append(fish)
@@ -530,8 +546,8 @@ class FishingView:
         if self._test_big_fish:
             for k, (sz, act) in enumerate(TU.TEST_BIG_FISH):
                 pos = best[k % len(best)]
-                fx  = max(1.0, min(float(UW_SIZE - 2), pos[0] + rng.uniform(-1.5, 1.5)))
-                fy  = max(1.0, min(float(UW_SIZE - 2), pos[1] + rng.uniform(-1.5, 1.5)))
+                fx  = max(1.0, min(float(UW_W - 2), pos[0] + rng.uniform(-1.5, 1.5)))
+                fy  = max(1.0, min(float(UW_H - 2), pos[1] + rng.uniform(-1.5, 1.5)))
                 fish = Fish(fx, fy, sz, self.uw_map, rng)
                 fish.activity = act
                 fishes.append(fish)
@@ -691,6 +707,7 @@ class FishingView:
 
     def update(self) -> None:
         self._frame_count += 1
+        self._update_camera()
         self._update_particles()
         if self._splash_timer > 0:
             self._splash_timer -= 1
@@ -765,9 +782,9 @@ class FishingView:
         cdx = (1 if keys[pygame.K_RIGHT] else 0) - (1 if keys[pygame.K_LEFT] else 0)
         cdy = (1 if keys[pygame.K_DOWN] else 0) - (1 if keys[pygame.K_UP] else 0)
         if cdx or cdy:
-            self.cast_cursor_x = max(0.0, min(float(UW_SIZE - 1),
+            self.cast_cursor_x = max(0.0, min(float(UW_W - 1),
                 self.cast_cursor_x + cdx * TU.CAST_CURSOR_SPEED))
-            self.cast_cursor_y = max(0.0, min(float(UW_SIZE - 1),
+            self.cast_cursor_y = max(0.0, min(float(UW_H - 1),
                 self.cast_cursor_y + cdy * TU.CAST_CURSOR_SPEED))
 
         for fish in self.fishes:
@@ -808,14 +825,14 @@ class FishingView:
                 elif cond == "pressure":
                     if self.lure.in_water:
                         lx = int(self.lure.x); ly = int(self.lure.y)
-                        if 0 <= lx < UW_SIZE and 0 <= ly < UW_SIZE:
+                        if 0 <= lx < UW_W and 0 <= ly < UW_H:
                             if self._pressure[ly][lx] >= 5:
                                 score += 0.12
 
         # ── Terrain match ─────────────────────────────────────────────
         if self.lure.in_water:
             lx = int(self.lure.x); ly = int(self.lure.y)
-            if 0 <= lx < UW_SIZE and 0 <= ly < UW_SIZE:
+            if 0 <= lx < UW_W and 0 <= ly < UW_H:
                 cell = self.uw_map.cell(lx, ly)
                 for terrain in spec.best_terrain:
                     if   terrain == "weed"    and cell.weed:                          score += 0.10
@@ -852,7 +869,7 @@ class FishingView:
 
         # ── Pressure tracking ──
         lx, ly = int(self.lure.x), int(self.lure.y)
-        if 0 <= lx < UW_SIZE and 0 <= ly < UW_SIZE:
+        if 0 <= lx < UW_W and 0 <= ly < UW_H:
             if self._frame_count % 18 == 0:
                 self._pressure[ly][lx] = min(15, self._pressure[ly][lx] + 1)
 
@@ -875,7 +892,7 @@ class FishingView:
             fx, fy  = int(fish.x), int(fish.y)
             pressure = (
                 self._pressure[fy][fx]
-                if 0 <= fx < UW_SIZE and 0 <= fy < UW_SIZE
+                if 0 <= fx < UW_W and 0 <= fy < UW_H
                 else 0
             )
             result = fish.update(visible, cell_pressure=pressure)
@@ -931,7 +948,7 @@ class FishingView:
                     event = "rod"
             if event is None:
                 # ストラクチャ通過直後 (新しいセルに入り、そこが地形)
-                if (lx, ly) != self._prev_lure_cell and 0 <= lx < UW_SIZE and 0 <= ly < UW_SIZE:
+                if (lx, ly) != self._prev_lure_cell and 0 <= lx < UW_W and 0 <= ly < UW_H:
                     cell = self.uw_map.cell(lx, ly)
                     if cell.weed or cell.cover or cell.terrain in (
                             TERRAIN_ROCK, TERRAIN_BREAK):
@@ -1015,7 +1032,7 @@ class FishingView:
         if quality == CAST_EARLY:
             # ショートキャスト: ゲージ不足分だけプレイヤー側 (y+) へずれる
             shortfall = (CAST_GOOD_LO - self._cast_charge) / CAST_GOOD_LO
-            ay += (float(UW_SIZE - 1) - ay) * min(
+            ay += (float(UW_H - 1) - ay) * min(
                 TU.CAST_EARLY_SHORTFALL_CAP,
                 shortfall * TU.CAST_EARLY_SHORTFALL_FACTOR,
             )
@@ -1026,8 +1043,8 @@ class FishingView:
         sigma, clamp = _CAST_DEVIATION[quality]
         dx = min(clamp, max(-clamp, random.gauss(0, sigma)))
         dy = min(clamp, max(-clamp, random.gauss(0, sigma)))
-        fx = max(0, min(UW_SIZE - 1, int(round(ax + dx))))
-        fy = max(0, min(UW_SIZE - 1, int(round(ay + dy))))
+        fx = max(0, min(UW_W - 1, int(round(ax + dx))))
+        fy = max(0, min(UW_H - 1, int(round(ay + dy))))
 
         self._intended_pos    = (iux, iuy)
         self._intended_timer  = INTENDED_FRAMES
@@ -1140,9 +1157,9 @@ class FishingView:
         dx, dy = self._line_run_dir
         spd = TU.WORM_LINE_RUN_SPEED
         if self._bite_fish is not None:
-            self._bite_fish.x = max(0.0, min(float(UW_SIZE - 1),
+            self._bite_fish.x = max(0.0, min(float(UW_W - 1),
                                              self._bite_fish.x + dx * spd))
-            self._bite_fish.y = max(0.0, min(float(UW_SIZE - 1),
+            self._bite_fish.y = max(0.0, min(float(UW_H - 1),
                                              self._bite_fish.y + dy * spd))
             # ルアーは魚に咥えられたまま追従 → ティップ→ルアーのラインが魚方向へ走る
             self.lure.x = self._bite_fish.x
@@ -1188,7 +1205,7 @@ class FishingView:
         # 巻物/その他は従来通り BITE→HOOK。
         if self._bite_mode == HOOKSET_DELAY:
             # 走る方向: アンカー(立ち位置)から沖へ + 開けた側へ少し横走り
-            ax = self.player_stance_x * (UW_SIZE - 1)
+            ax = self.player_stance_x * (UW_W - 1)
             side = -1.0 if biting.x < ax else 1.0
             self._line_run_dir = (side * 0.55, -0.83)   # 沖向き(手前→奥) 主体
             self.state = FS_WEIGHT
@@ -1571,7 +1588,7 @@ class FishingView:
         if not self.lure.in_water:
             return 0.0
         lx, ly = int(self.lure.x), int(self.lure.y)
-        if 0 <= lx < UW_SIZE and 0 <= ly < UW_SIZE:
+        if 0 <= lx < UW_W and 0 <= ly < UW_H:
             return self.uw_map.full_score(lx, ly)
         return 0.0
 
@@ -1582,24 +1599,51 @@ class FishingView:
             return None
         return self.lure
 
+    # ── Exploration v2: 横スクロールカメラ ────────────────────────────
+    def _camera_target(self) -> float:
+        """player_stance_x(0..1, 世界全幅) を画面中央に置くカメラ目標 (px, クランプ済)。"""
+        player_world_x = self.player_stance_x * WORLD_W
+        return max(0.0, min(float(CAM_X_MAX), player_world_x - MAIN_W * 0.5))
+
+    def _update_camera(self) -> None:
+        """カメラを目標位置へ滑らかに追従させる。歩行(A/D)で立ち位置が動くと
+        ビューが左右にスクロールし、探索感が出る。キャスト/ファイト中は立ち位置が
+        固定なのでカメラも止まる。"""
+        target = self._camera_target()
+        self.cam_x += (target - self.cam_x) * CAM_FOLLOW
+        if abs(target - self.cam_x) < 0.5:
+            self.cam_x = target
+
+    def _world_x(self, ux: float) -> float:
+        """水中グリッドx(0..UW_W-1) → 世界座標x(px, カメラ適用前)。"""
+        return (ux / (UW_W - 1)) * WORLD_W
+
+    def _uw_to_world(self, ux: float, uy: float) -> Tuple[int, int]:
+        """水中グリッド → 世界座標(px, カメラ適用前)。事前生成サーフェス構築用。"""
+        wx = int(self._world_x(ux))
+        t  = uy / (UW_H - 1)
+        wy = int(WATER_Y0 + t * (WATER_NEAR_Y - WATER_Y0))
+        return wx, wy
+
     def _screen_to_uw(self, sx: int, sy: int) -> Tuple[Optional[int], Optional[int]]:
         if not (0 <= sx < MAIN_W and WATER_Y0 <= sy <= WATER_NEAR_Y):
             return None, None
-        ux = int((sx / MAIN_W) * (UW_SIZE - 1))
+        world_x = sx + self.cam_x                       # 画面→世界 (カメラ逆適用)
+        ux = int((world_x / WORLD_W) * (UW_W - 1))
         t  = (sy - WATER_Y0) / (WATER_NEAR_Y - WATER_Y0)
-        uy = int(t * (UW_SIZE - 1))
-        return max(0, min(UW_SIZE-1, ux)), max(0, min(UW_SIZE-1, uy))
+        uy = int(t * (UW_H - 1))
+        return max(0, min(UW_W-1, ux)), max(0, min(UW_H-1, uy))
 
     def _uw_to_screen(self, ux: float, uy: float) -> Tuple[int, int]:
-        sx = int((ux / (UW_SIZE - 1)) * MAIN_W)
-        t  = uy / (UW_SIZE - 1)
+        sx = int(self._world_x(ux) - self.cam_x)        # 世界→画面 (カメラ適用)
+        t  = uy / (UW_H - 1)
         sy = int(WATER_Y0 + t * (WATER_NEAR_Y - WATER_Y0))
         return sx, sy
 
     def _get_hovered_grid_cell(self) -> Tuple[Optional[int], Optional[int]]:
         mx, my = pygame.mouse.get_pos()
         gx, gy = mx - UW_GRID_X, my - UW_GRID_Y
-        if 0 <= gx < UW_SIZE * CELL_PX and 0 <= gy < UW_SIZE * CELL_PX:
+        if 0 <= gx < UW_W * CELL_PX and 0 <= gy < UW_H * CELL_PX:
             return gx // CELL_PX, gy // CELL_PX
         return None, None
 
@@ -1625,11 +1669,15 @@ class FishingView:
             pygame.draw.line(surface,
                              (int(50+t*80), int(100+t*80), int(180+t*50)),
                              (0, y), (MAIN_W-1, y))
-        # Treeline
+        # Treeline (遠景: カメラに対し弱いパララックスでスクロール = 奥行き感)
         pygame.draw.rect(surface, (35,75,25), (0, SHORE_Y0, MAIN_W, SHORE_Y1-SHORE_Y0))
-        for tx in range(0, MAIN_W, 38):
-            h = 20 + (tx*13 % 30)
-            pygame.draw.rect(surface, (25,55,15), (tx, SHORE_Y1-h, 18, h))
+        tree_off = self.cam_x * 0.5     # 遠景は半速 (TREELINE_PARALLAX)
+        for tx in range(0, WORLD_W, 38):
+            sx = int(tx - tree_off)
+            if sx < -20 or sx > MAIN_W:
+                continue
+            h = 20 + (tx*13 % 30)       # 高さは世界座標基準 → スクロールしてもチラつかない
+            pygame.draw.rect(surface, (25,55,15), (sx, SHORE_Y1-h, 18, h))
         # Horizon
         pygame.draw.rect(surface, (90,150,210), (0, SHORE_Y1, MAIN_W, 18))
         # Water gradient (手前端 WATER_NEAR_Y まで)
@@ -1643,8 +1691,10 @@ class FishingView:
         pygame.draw.rect(surface, (12,45,110), (0, WATER_NEAR_Y, MAIN_W, SCREEN_H-WATER_NEAR_Y))
 
         # ── ストラクチャー常時表示 (水中の影 + 水上の立ち木/岩/ウィード) ──
+        # Exploration v2: 世界幅で構築し、カメラぶん左へずらして描く。
+        # ※ _struct_surf を WORLD_W 幅で再生成する変更は grid-widening 側で行う。
         if self._struct_surf is not None:
-            surface.blit(self._struct_surf, (0, 0))
+            surface.blit(self._struct_surf, (int(-self.cam_x), 0))
 
         # Depth guide lines on water surface (faint horizontals per 0.5m)
         if self.lure.in_water:
@@ -1891,7 +1941,7 @@ class FishingView:
             if not (0 <= fx < MAIN_W and WATER_Y0 <= fy <= WATER_NEAR_Y):
                 continue
             # 奥ほど小さく + サイズ反映。BITEは少し濃く
-            depth_scale = 0.5 + 0.5 * (fish.y / (UW_SIZE - 1))
+            depth_scale = 0.5 + 0.5 * (fish.y / (UW_H - 1))
             body_len = int((14 + fish.size * 0.55) * depth_scale)
             body_h   = max(4, int(body_len * 0.42))
             alpha    = 70 if fish.state == REACT_CHASE else 105
@@ -1918,8 +1968,8 @@ class FishingView:
         overlay = pygame.Surface((MAIN_W, SCREEN_H), pygame.SRCALPHA)
 
         # 地形セル (flat 以外のみ; 半透明)
-        for cy in range(UW_SIZE):
-            for cx in range(UW_SIZE):
+        for cy in range(UW_H):
+            for cx in range(UW_W):
                 cell = self.uw_map.cell(cx, cy)
                 if cell.terrain == TERRAIN_ROCK:
                     color = C_ROCK_CELL
@@ -2077,25 +2127,26 @@ class FishingView:
 
     @property
     def rod_anchor(self) -> Tuple[int, int]:
-        """ロッドのバット位置 (画面座標)。プレイヤーの立ち位置 x に連動し、
-        画面下端の下 (手元) から伸びる。"""
-        return (int(self.player_stance_x * MAIN_W), ROD_BASE_Y)
+        """ロッドのバット位置 (画面座標)。プレイヤーの立ち位置 x(世界座標) に連動し、
+        カメラ(cam_x)を適用した画面x、画面下端の下 (手元) から伸びる。
+        追従カメラにより通常は画面中央付近に来る。"""
+        screen_x = self.player_stance_x * WORLD_W - self.cam_x
+        return (int(screen_x), ROD_BASE_Y)
 
     def _player_anchor_cell(self) -> Tuple[float, float]:
         """プレイヤー立ち位置の水中グリッド基準点 (足場)。
 
-        x = 立ち位置 (player_stance_x)、y = 手前端 (= 岸 / プレイヤー側)。
+        x = 立ち位置 (player_stance_x, 幅 UW_W 基準)、y = 手前端 (= 岸)。
         ファイトのライン長・寄せ方向はこの点を基準に2Dで計算する。
         """
-        ax = self.player_stance_x * (UW_SIZE - 1)
-        ay = float(UW_SIZE - 1)
+        ax = self.player_stance_x * (UW_W - 1)
+        ay = float(UW_H - 1)
         return (ax, ay)
 
     def _retrieve_target_cell_x(self) -> float:
-        """リトリーブの自然な寄せ先 = プレイヤーの立ち位置の列。
-        ロッドティップへ水平吸収させるのではなく、立ち位置基準のラインへ寄せる。"""
-        return max(0.0, min(float(UW_SIZE - 1),
-                            self.player_stance_x * (UW_SIZE - 1)))
+        """リトリーブの自然な寄せ先 = プレイヤーの立ち位置の列 (幅 UW_W 基準)。"""
+        return max(0.0, min(float(UW_W - 1),
+                            self.player_stance_x * (UW_W - 1)))
 
     def _draw_rod(self, surface: pygame.Surface) -> None:
         """ロッド本体 + ラインを描画。"""
@@ -2409,14 +2460,14 @@ class FishingView:
 
         # Pin-spot outlines in debug
         if self.debug_mode:
-            for cy in range(UW_SIZE):
-                for cx in range(UW_SIZE):
+            for cy in range(UW_H):
+                for cx in range(UW_W):
                     if self.uw_map.full_score(cx,cy) >= PIN_HIGH_SCORE:
                         pygame.draw.rect(surface, C_WHITE,
                             (UW_GRID_X+cx*CELL_PX, UW_GRID_Y+cy*CELL_PX, CELL_PX-1,CELL_PX-1),1)
 
         pygame.draw.rect(surface, C_GRAY,
-            (UW_GRID_X-1,UW_GRID_Y-1,UW_SIZE*CELL_PX+2,UW_SIZE*CELL_PX+2),1)
+            (UW_GRID_X-1,UW_GRID_Y-1,UW_W*CELL_PX+2,UW_H*CELL_PX+2),1)
 
         # Fish dots (reaction-stage colour)
         for fish in self.fishes:
@@ -2443,7 +2494,7 @@ class FishingView:
             iy = int(UW_GRID_Y + iuy * CELL_PX)
             pygame.draw.circle(surface, (200,200,100), (ix,iy), 5, 1)
 
-        info_y = UW_GRID_Y + UW_SIZE*CELL_PX + 8
+        info_y = UW_GRID_Y + UW_H*CELL_PX + 8
         if self.debug_mode:
             self._draw_debug_info(surface, info_y)
         else:

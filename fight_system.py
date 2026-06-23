@@ -46,7 +46,7 @@ import math
 import random
 from typing import List, Optional, Tuple
 
-from constants import HOOK_QUALITY_HOLD, UW_SIZE
+from constants import HOOK_QUALITY_HOLD, UW_SIZE, UW_W, UW_H
 import tuning as TU
 
 # ── テンションゾーン境界 (tuning.py から; 他モジュールが参照する別名) ──
@@ -244,8 +244,8 @@ class FightState:
             ux, uy = 0.0, -1.0   # 向きが無ければ沖(手前→奥)方向へ
         else:
             ux, uy = dx / d, dy / d
-        self.fish_x = max(0.0, min(float(UW_SIZE - 1), self.fish_x + ux * cells))
-        self.fish_y = max(0.0, min(float(UW_SIZE - 1), self.fish_y + uy * cells))
+        self.fish_x = max(0.0, min(float(UW_W - 1), self.fish_x + ux * cells))
+        self.fish_y = max(0.0, min(float(UW_H - 1), self.fish_y + uy * cells))
 
     # ── メイン更新 ────────────────────────────────────────────────────
 
@@ -548,13 +548,13 @@ class FightState:
         # 慣性で速度追従 → 位置更新 → グリッドにクランプ
         self._vx += (tvx - self._vx) * TU.FIGHT_DIST_ACCEL
         self._vy += (tvy - self._vy) * TU.FIGHT_DIST_ACCEL
-        self.fish_x = max(0.0, min(float(UW_SIZE - 1), self.fish_x + self._vx))
-        self.fish_y = max(0.0, min(float(UW_SIZE - 1), self.fish_y + self._vy))
+        self.fish_x = max(0.0, min(float(UW_W - 1), self.fish_x + self._vx))
+        self.fish_y = max(0.0, min(float(UW_H - 1), self.fish_y + self._vy))
 
         # グリッド端まで泳いだら自然に向きを変える (横走りの反転)
         if self.fish_x <= 0.5 and self._head_target < 0:
             self._head_target = -self._head_target
-        elif self.fish_x >= UW_SIZE - 1.5 and self._head_target > 0:
+        elif self.fish_x >= UW_W - 1.5 and self._head_target > 0:
             self._head_target = -self._head_target
 
     # ── 障害物 ────────────────────────────────────────────────────────
