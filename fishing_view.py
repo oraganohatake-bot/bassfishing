@@ -156,6 +156,7 @@ _CHARGE_RATE: dict = {
 # ── Debug ─────────────────────────────────────────────────────────────
 _MAX_SCORE_VIS = 12.0
 
+
 def _score_to_heat(score: float) -> Tuple[int, int, int]:
     t = min(1.0, score / _MAX_SCORE_VIS)
     if t < 0.35:
