@@ -26,7 +26,7 @@ def _scale_count(n: int) -> int:
 
 
 class UnderwaterCell:
-    __slots__ = ("depth", "terrain", "weed", "cover", "bait")
+    __slots__ = ("depth", "terrain", "weed", "cover", "bait", "log_id")
 
     def __init__(self) -> None:
         self.depth: float = 1.0
@@ -34,6 +34,7 @@ class UnderwaterCell:
         self.weed: bool = False
         self.cover: bool = False
         self.bait: int = 0
+        self.log_id: int = -1  # TERRAIN_COVER クラスター ID (-1 = 未所属)
 
     @property
     def holding_score(self) -> float:
@@ -152,7 +153,7 @@ class UnderwaterMap:
 
     def _place_cover(self, n_clusters: int, density: float) -> None:
         W, H = self.W, self.H
-        for _ in range(n_clusters):
+        for cluster_id in range(n_clusters):
             wx = self._rng.randint(2, W - 3)
             wy = self._rng.randint(2, H - 3)
             for dy in range(-2, 3):
@@ -163,6 +164,7 @@ class UnderwaterMap:
                             c = self.cells[ny][nx]
                             c.cover = True
                             c.terrain = TERRAIN_COVER
+                            c.log_id = cluster_id
 
     def _place_rocks(self, n_clusters: int, density: float) -> None:
         W, H = self.W, self.H

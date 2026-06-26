@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import math
+import os
 import random
 from typing import Optional, Tuple
 
@@ -156,6 +157,124 @@ _CHARGE_RATE: dict = {
 # ── Debug ─────────────────────────────────────────────────────────────
 _MAX_SCORE_VIS = 12.0
 
+# ── Sprite sheet helpers ───────────────────────────────────────────────
+_STRUCT_SIZE_BOOST = 0.55   # pscale × SIZE_BOOST = 最終スケール係数 (水面点在サイズ)
+_SPRITE_MIN_PX    = 50      # 両辺がこの値未満のスプライトは除外
+_BFS_DS           = 6       # ダウンサンプル係数 (BFS 高速化)
+
+def _pil_remove_white_bg(pil_img, threshold: int = 230):
+    """RGB 各チャンネルが全て threshold 超のピクセルをα=0にする (per-channel)。"""
+    from PIL import ImageChops
+    img = pil_img.convert('RGBA')
+    r, g, b, a = img.split()
+    min_rgb = ImageChops.darker(ImageChops.darker(r, g), b)
+    # min(R,G,B) > threshold → 背景 (α=0)、それ以外 → 前景 (α=255)
+    bg_mask = min_rgb.point(lambda p: 0 if p > threshold else 255)
+    img.putalpha(ImageChops.darker(a, bg_mask))
+    return img
+
+def _pil_to_pg(pil_img) -> pygame.Surface:
+    if pil_img.mode != 'RGBA':
+        pil_img = pil_img.convert('RGBA')
+    return pygame.image.fromstring(pil_img.tobytes(), pil_img.size, 'RGBA').convert_alpha()
+
+def _bfs_bboxes(alpha_bytes: bytes, w: int, h: int) -> list:
+    """ダウンサンプルBFSで連結成分を検出し、元画像座標のバウンディングボックスを返す。
+
+    方針:
+    - α>0 のピクセルを1、それ以外を0の2値画像とする
+    - _BFS_DS ピクセルのブロックに縮小して高速化
+    - 連結成分ごとに (x0, y0, x1, y1) を元座標で返す
+    """
+    ds = _BFS_DS
+    dw = max(1, w // ds)
+    dh = max(1, h // ds)
+
+    # ブロックごとの max alpha (空ブロック=0 / 有効ブロック>0)
+    ds_a = bytearray(dw * dh)
+    for by in range(dh):
+        for bx in range(dw):
+            mx = 0
+            for dy in range(ds):
+                y = by * ds + dy
+                if y >= h:
+                    break
+                off = y * w
+                for dx in range(ds):
+                    x = bx * ds + dx
+                    if x >= w:
+                        break
+                    v = alpha_bytes[off + x]
+                    if v > mx:
+                        mx = v
+            ds_a[by * dw + bx] = mx
+
+    visited = bytearray(dw * dh)
+    components = []
+
+    for start in range(dw * dh):
+        if visited[start] or ds_a[start] == 0:
+            continue
+        q = [start]
+        visited[start] = 1
+        mbx = Mbx = start % dw
+        mby = Mby = start // dw
+        head = 0
+        while head < len(q):
+            idx = q[head]; head += 1
+            by_, bx_ = divmod(idx, dw)
+            if bx_ < mbx: mbx = bx_
+            if bx_ > Mbx: Mbx = bx_
+            if by_ < mby: mby = by_
+            if by_ > Mby: Mby = by_
+            for nbx, nby in ((bx_-1, by_), (bx_+1, by_), (bx_, by_-1), (bx_, by_+1)):
+                if 0 <= nbx < dw and 0 <= nby < dh:
+                    ni = nby * dw + nbx
+                    if not visited[ni] and ds_a[ni] > 0:
+                        visited[ni] = 1
+                        q.append(ni)
+
+        # 元画像座標に変換 (ブロック境界 + 余白)
+        x0 = max(0, mbx * ds - ds)
+        y0 = max(0, mby * ds - ds)
+        x1 = min(w, (Mbx + 1) * ds + ds)
+        y1 = min(h, (Mby + 1) * ds + ds)
+        components.append((x0, y0, x1, y1))
+
+    return components
+
+def _slice_sheet(path: str) -> list:
+    """PNGシートを個別スプライトに切り出す (透過・白背景両対応)。
+
+    手順:
+    1. RGB/L/P モード → 白背景除去 (全 ch > 230 → α=0)
+    2. RGBA 2値化 (α>0 → 1)
+    3. ダウンサンプル BFS で連結成分を検出
+    4. 元画像から切り出し → getbbox で余白除去
+    5. 最小サイズフィルタ (両辺 ≥ _SPRITE_MIN_PX)
+    """
+    from PIL import Image
+    img = Image.open(path)
+    if img.mode in ('RGB', 'L', 'P'):
+        img = _pil_remove_white_bg(img)
+    else:
+        img = img.convert('RGBA')
+
+    w, h = img.size
+    alpha_bytes = img.split()[3].tobytes()
+    bboxes = _bfs_bboxes(alpha_bytes, w, h)
+
+    sprites = []
+    for (x0, y0, x1, y1) in bboxes:
+        cell = img.crop((x0, y0, x1, y1))
+        bbox = cell.split()[3].getbbox()
+        if bbox:
+            sw, sh = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            if sw >= _SPRITE_MIN_PX and sh >= _SPRITE_MIN_PX:
+                sprites.append(_pil_to_pg(cell.crop(bbox)))
+
+    return sprites or [_pil_to_pg(img)]
+
 
 def _score_to_heat(score: float) -> Tuple[int, int, int]:
     t = min(1.0, score / _MAX_SCORE_VIS)
@@ -250,6 +369,7 @@ class FishingView:
         # プレイヤーの立ち位置 (足場) — ライン角度/アプローチ角を決める。
         # 釣りビューに入った時点で岸位置から決まる (今は spot/seed から決定的に導出)。
         # 0.0=左端の岸, 0.5=正面, 1.0=右端の岸。将来は釣りビュー内で左右移動可に。
+        self._seed: int = seed
         stance_seed = (hash(spot_name) ^ (seed * 2654435761)) & 0xFFFF
         self.player_stance_x: float = 0.30 + 0.40 * (stance_seed % 1000) / 1000.0
 
@@ -442,64 +562,97 @@ class FishingView:
         self._vgauge_surf = surf
 
     def _build_field_struct_surf(self) -> None:
-        """釣りビュー内のストラクチャー描画 (常時表示) を事前生成する。
+        """スプライト描画でストラクチャーを事前生成 (WORLD_W × SCREEN_H 透過サーフェス)。
 
-        水中: ウィード/カバー/ロック/ブレイクのセルを半透明の色味で水面に投影。
-        水上: ウィードの穂先・カバーの立ち木/杭・水面を割るロックを
-              セル位置から上方向へ描き込む (奥ほど小さく = 簡易パース)。
+        ペインターズアルゴリズム (cy 小=奥 → 大=手前) で描画し、
+        手前オブジェクトが奥を上書きする。
         """
-        # Exploration v2: 世界幅(WORLD_W)で構築し、毎フレーム -cam_x で blit する。
-        # ※ カメラ込みの _uw_to_screen ではなく、カメラ無しの _uw_to_world を使う
-        #    (二重適用の防止)。
+        asset_root = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "assets", "structures"
+        )
+
+        def load(rel: str) -> list:
+            return _slice_sheet(os.path.join(asset_root, rel))
+
+        log_dry = load("log_dry/log_dry_5patterns.png") + load("log_dry/log_dry_8patterns.png")
+        log_wet = load("log_wet/log_wet_8patterns.png")
+        rock    = load("rock/rock_sheet.png")
+        reed    = load("reed/reed.png")
+
+        pool_map = {
+            TERRAIN_COVER: log_dry + log_wet,
+            TERRAIN_ROCK:  rock,
+            TERRAIN_WEED:  reed,
+        }
+
         surf = pygame.Surface((WORLD_W, SCREEN_H), pygame.SRCALPHA)
 
-        for cy in range(UW_H):
-            scale = 0.35 + 0.65 * (cy / (UW_H - 1))   # 奥=小さく 手前=大きく
+        # ── COVER: logId ベースで手前セルを代表点に選ぶ ──────────────────
+        # 手前 (cy 大) → 奥 (cy 小) にスキャンし、各クラスターの最初の
+        # 出現 (= 最も手前のセル) を代表座標として採用する。
+        cover_rep: dict = {}   # log_id → (cx, cy)
+        for cy in range(UW_H - 1, -1, -1):
             for cx in range(UW_W):
-                cell = self.uw_map.cell(cx, cy)
-                sx, sy = self._uw_to_world(cx, cy)
-                x0, y0 = self._uw_to_world(cx - 0.5, cy - 0.5)
-                x1, y1 = self._uw_to_world(cx + 0.5, cy + 0.5)
-                w, h = max(2, x1 - x0), max(2, y1 - y0)
-                j = (cx * 73 + cy * 131) % 7   # セル固有の揺らぎ
+                cell = self.uw_map.cells[cy][cx]
+                if cell.terrain == TERRAIN_COVER:
+                    lid = cell.log_id
+                    if lid >= 0 and lid not in cover_rep:
+                        cover_rep[lid] = (cx, cy)
 
-                if cell.terrain == TERRAIN_ROCK:
-                    # 水中の岩影 + 水面を割る岩頭
-                    pygame.draw.ellipse(surf, (95, 95, 105, 70), (x0, y0, w, h))
-                    rw = int((6 + j) * scale)
-                    rh = int((4 + j // 2) * scale)
-                    if rw >= 2 and rh >= 2:
-                        pygame.draw.ellipse(
-                            surf, (110, 110, 120, 230),
-                            (sx - rw, sy - rh, rw * 2, rh + 2))
-                        pygame.draw.ellipse(
-                            surf, (200, 215, 230, 90),
-                            (sx - rw - 3, sy - 2, rw * 2 + 6, 4), 1)
-                elif cell.cover:
-                    # 水中のカバー影 + 立ち木/杭
-                    pygame.draw.ellipse(surf, (110, 75, 35, 75), (x0, y0, w, h))
-                    th = int((16 + j * 3) * scale)
-                    tw = max(1, int(3 * scale))
-                    tx = sx + (j - 3) * 2
-                    pygame.draw.line(surf, (85, 58, 30, 235),
-                                     (tx, sy + 2), (tx, sy - th), tw)
-                    pygame.draw.line(surf, (85, 58, 30, 200),
-                                     (tx, sy - th + 4),
-                                     (tx + int(6 * scale) * (1 if j % 2 else -1),
-                                      sy - th), max(1, tw - 1))
-                elif cell.weed:
-                    # 水中のウィード + 水面に出る穂先
-                    pygame.draw.ellipse(surf, (40, 110, 55, 80), (x0, y0, w, h))
-                    for k in range(2 + j % 2):
-                        gx = sx + (k * 5 - 4) + (j % 3)
-                        gh = int((7 + (j + k * 2) % 6) * scale)
-                        pygame.draw.line(surf, (55, 130, 60, 220),
-                                         (gx, sy + 1), (gx + 1, sy - gh), 1)
-                elif cell.terrain == TERRAIN_BREAK:
-                    # ブレイク: 水中のみ。色味を落とした帯で段差を示す
-                    pygame.draw.rect(surf, (15, 45, 95, 70), (x0, y0, w, h))
-                    pygame.draw.line(surf, (130, 170, 210, 60),
-                                     (x0, y1 - 1), (x1, y1 - 1), 1)
+        # ── 描画リストを収集 (ペインターズアルゴリズム用) ─────────────────
+        # to_draw: [(cy, cx, pool), ...]  → cy 昇順でブリット = 奥から手前
+        to_draw: list = []
+
+        for cy in range(UW_H):
+            for cx in range(UW_W):
+                cell = self.uw_map.cells[cy][cx]
+
+                if cell.terrain == TERRAIN_COVER:
+                    # 代表セルのみ描画
+                    lid = cell.log_id
+                    if lid < 0 or cover_rep.get(lid) != (cx, cy):
+                        continue
+                    pool = pool_map[TERRAIN_COVER]
+
+                elif cell.terrain == TERRAIN_ROCK:
+                    # 3 セルおきに間引き
+                    if cx % 3 != 0 or cy % 3 != 0:
+                        continue
+                    pool = pool_map[TERRAIN_ROCK]
+
+                elif cell.terrain == TERRAIN_WEED and cy > UW_H * 0.65:
+                    # 奥半分のみ・3 セルおきに間引き
+                    if cx % 3 != 0 or cy % 3 != 0:
+                        continue
+                    pool = pool_map[TERRAIN_WEED]
+
+                else:
+                    continue
+
+                if pool:
+                    to_draw.append((cy, cx, pool))
+
+        # ── ペインターズアルゴリズム: cy 昇順 (奥→手前) でブリット ─────────
+        # WATER_Y0 が背景の視覚的水面に揃ったため、わずかなマージンのみ残す。
+        _STRUCT_MIN_WY = WATER_Y0 + 30   # この y より上は描画しない
+
+        for (cy, cx, pool) in to_draw:
+            sx, sy = self._uw_to_world(cx, cy)
+            if sy < _STRUCT_MIN_WY:
+                continue
+
+            pscale = 0.35 + 0.65 * (cy / max(1, UW_H - 1))
+            spr_rng = random.Random(self._seed ^ (cx * 97 + cy * 211))
+            spr = spr_rng.choice(pool)
+
+            orig_w, orig_h = spr.get_size()
+            scale = pscale * _STRUCT_SIZE_BOOST
+            new_w = max(1, int(orig_w * scale))
+            new_h = max(1, int(orig_h * scale))
+            scaled = pygame.transform.scale(spr, (new_w, new_h))
+
+            # アンカー: 下端の 25% を水面下に沈める (浮き上がり防止)
+            surf.blit(scaled, (sx - new_w // 2, sy - new_h + new_h // 4))
 
         self._struct_surf = surf
 
@@ -1694,7 +1847,10 @@ class FishingView:
         # Exploration v2: 世界幅で構築し、カメラぶん左へずらして描く。
         # ※ _struct_surf を WORLD_W 幅で再生成する変更は grid-widening 側で行う。
         if self._struct_surf is not None:
+            old_clip = surface.get_clip()
+            surface.set_clip(pygame.Rect(0, WATER_Y0, MAIN_W, SCREEN_H - WATER_Y0))
             surface.blit(self._struct_surf, (int(-self.cam_x), 0))
+            surface.set_clip(old_clip)
 
         # Depth guide lines on water surface (faint horizontals per 0.5m)
         if self.lure.in_water:
