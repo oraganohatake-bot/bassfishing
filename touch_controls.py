@@ -131,6 +131,10 @@ class TouchControls:
         self.lure_next = _Button((740, 658, 70, 60), "▶", None, **_LU)
         # 名前プレートの矩形 (当たり判定なし, 描画専用) — ボタンより少し小さく中央寄せ
         self.lure_plate = pygame.Rect(548, 661, 164, 52)
+        # デバッグトグル: 左上隅の小ボタン。タップで K_F2 を発火 → debug_mode をトグル。
+        # modes=None / fish_states=None で常時表示。
+        self.debug_btn = _Button((4, 4, 60, 36), "DBG", pygame.K_F2)
+        self.debug_active: bool = False   # 毎フレーム game が FishingView.debug_mode を転写
 
     @property
     def _reel_held(self) -> bool:
@@ -177,6 +181,8 @@ class TouchControls:
 
     # ── hit testing ────────────────────────────────────────────────────────
     def _resolve(self, pos) -> Tuple[str, Optional[_Button]]:
+        if self.debug_btn.rect.collidepoint(pos):
+            return "debug", self.debug_btn
         if (self.mode == "fishing"
                 and self.primary.visible(self.mode, self.fish_state)
                 and self.primary.rect.collidepoint(pos)):
@@ -242,6 +248,8 @@ class TouchControls:
 
     def _make_target(self, pos):
         kind, b = self._resolve(pos)
+        if kind == "debug":
+            return ("action", b.key, b)
         if kind == "dpad":
             return ("dpad", b.key)
         if kind == "move":
@@ -375,6 +383,16 @@ class TouchControls:
             self._draw_btn(overlay, self.primary.rect, pressed)
             self._draw_text(overlay, self.primary.rect, self._primary_label())
         self._draw_lure_switch(overlay)
+        # DBG ボタン: アクティブ時はオレンジ枠で強調
+        dbg_pressed = self.debug_btn in self._pressed_btns
+        if self.debug_active:
+            pygame.draw.rect(overlay, (255, 160, 40, 180),
+                             self.debug_btn.rect, border_radius=8)
+            pygame.draw.rect(overlay, (255, 200, 80, 230),
+                             self.debug_btn.rect, width=2, border_radius=8)
+        else:
+            self._draw_btn(overlay, self.debug_btn.rect, dbg_pressed)
+        self._draw_text(overlay, self.debug_btn.rect, "DBG")
         screen.blit(overlay, (0, 0))
 
     def _draw_lure_switch(self, surf) -> None:

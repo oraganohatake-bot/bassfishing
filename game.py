@@ -301,6 +301,7 @@ class Game:
             self.touch.lure_idx = self.fishing_view._lure_idx
             self.touch.lure_name = LURE_NAMES[self.fishing_view._lure_idx]
             self.touch.lure_count = len(LURE_NAMES)
+            self.touch.debug_active = self.fishing_view.debug_mode
         self.touch.draw(self.screen)
 
         # Flash message (on top of any screen)
