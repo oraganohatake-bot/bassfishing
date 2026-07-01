@@ -276,6 +276,7 @@ class Game:
 
         elif self.state == ST_FISHING and self.fishing_view:
             self.screen.fill(C_BLACK)
+            self.fishing_view.is_mobile = self.touch._touch_active
             self.fishing_view.draw(self.screen)
 
         # F2: 大型魚一覧デバッグオーバーレイ

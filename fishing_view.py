@@ -11,6 +11,7 @@ import pygame
 
 from constants import (
     SCREEN_W, SCREEN_H, UW_SIZE, UW_W, UW_H, FISHING_VIEW_WIDTH_SCALE,
+    ZOOM_W, PIX_DIV, SIZE_BOOST,
     FS_IDLE, FS_CAST_CHARGE, FS_CASTING, FS_RETRIEVE, FS_BITE,
     FS_WEIGHT, FS_LINE_RUN, FS_FIGHT,
     FS_KEEP_RELEASE, FS_RESULT,
@@ -30,6 +31,8 @@ from constants import (
 )
 from spot_templates import SPOT_CONFIGS, DEFAULT_CONFIG
 from underwater_map import UnderwaterMap
+from fishing_spots import spot_name_to_id
+from fishing_terrain import build_fishing_terrain
 from fish import Fish
 from lure import Lure
 from lure_catalog import (
@@ -346,6 +349,10 @@ class FishingView:
         # Pressure grid (runtime, not saved)
         self._pressure = [[0] * UW_W for _ in range(UW_H)]
 
+        # Phase A: FishingTerrain (InfluenceGrid)
+        self.spot_id: str = spot_name_to_id(spot_name)
+        self.terrain = build_fishing_terrain(self.spot_id)
+
         # Debug
         self.debug_mode = False
 
@@ -357,9 +364,14 @@ class FishingView:
         self._score_surf:   Optional[pygame.Surface] = None
         self._struct_surf:  Optional[pygame.Surface] = None  # フィールド内ストラクチャー
         self._vgauge_surf:  Optional[pygame.Surface] = None  # テンションゲージ(縦グラデ)
+        self._depth_tint_surf: Optional[pygame.Surface] = None  # Phase B: 水深濃淡レイヤー (未使用)
+        self._depth_debug_surf: Optional[pygame.Surface] = None  # F2デバッグ用水深グラデ
 
         # V5: 軽量水面パーティクル (波紋/スプラッシュ/しぶき)
         self._particles: list = []
+
+        # Mobile HUD: Game が毎フレーム touch._touch_active をここへ転写する
+        self.is_mobile: bool = False
 
     # ── Lifecycle ──────────────────────────────────────────────────────
 
@@ -371,6 +383,13 @@ class FishingView:
         self._build_score_surf()
         self._build_field_struct_surf()
         self._build_vgauge_surf()
+        self._build_depth_tint_surf()
+        self._build_depth_debug_surf()
+        # Pixel-art pipeline surfaces (pre-allocated, 24-bit to avoid A=0 transparency on macOS SDL2)
+        self._full_off = pygame.Surface((MAIN_W, SCREEN_H), 0, 24)
+        self._pix_off  = pygame.Surface((MAIN_W // PIX_DIV, SCREEN_H // PIX_DIV), 0, 24)
+        self._pix_crop = pygame.Surface((ZOOM_W // PIX_DIV, SCREEN_H // PIX_DIV), 0, 24)
+        self._zoomed   = pygame.Surface((MAIN_W, SCREEN_H), 0, 24)
 
     def _build_terrain_surf(self) -> None:
         surf = pygame.Surface((UW_W * CELL_PX, UW_H * CELL_PX))
@@ -441,6 +460,103 @@ class FishingView:
             pygame.draw.line(surf, col, (0, yy), (W, yy))
         self._vgauge_surf = surf
 
+    def _build_depth_tint_surf(self) -> None:
+        """Phase B: terrain.cells の水深を水面に薄く投影するレイヤーを事前生成。
+
+        WORLD_W×SCREEN_H の SRCALPHA サーフェスを作り、
+        terrain のセルごとに浅い=薄め / 深い=暗め の色矩形を塗る。
+        _draw_scene で (-cam_x, 0) にブリットする。
+        既存描画の上に重ねるだけなので黒画面化しない。
+        """
+        from fishing_spots import get_fishing_spot
+
+        surf = pygame.Surface((WORLD_W, SCREEN_H), pygame.SRCALPHA)
+        tr = self.terrain
+        if not tr.cells:
+            self._depth_tint_surf = surf
+            return
+
+        spot = get_fishing_spot(self.spot_id)
+        depth_range = max(0.1, spot.max_depth_m - spot.base_depth_m)
+        water_h = WATER_NEAR_Y - WATER_Y0
+        cell_w = WORLD_W / tr.grid_cols
+        cell_h = water_h / tr.grid_rows
+
+        for row in range(tr.grid_rows):
+            y0 = int(WATER_Y0 + row * cell_h)
+            y1 = min(int(WATER_Y0 + (row + 1) * cell_h) + 1, WATER_NEAR_Y)
+            if y1 <= y0:
+                continue
+            for col in range(tr.grid_cols):
+                x0 = int(col * cell_w)
+                x1 = int((col + 1) * cell_w) + 1
+                tc = tr.cell(col, row)
+                t = max(0.0, min(1.0, (tc.depth_m - spot.base_depth_m) / depth_range))
+                # 浅い(t=0): ほぼ透明 / 深い(t=1): 暗い紺でやや不透明
+                alpha = int(12 + t * 48)     # 12 → 60
+                r_val = int(8  * (1.0 - t))  # 8  → 0
+                g_val = int(30 * (1.0 - t))  # 30 → 0
+                b_val = int(80 + t * 40)     # 80 → 120
+                surf.fill((r_val, g_val, b_val, alpha), (x0, y0, x1 - x0, y1 - y0))
+
+        self._depth_tint_surf = surf
+
+    def _build_depth_debug_surf(self) -> None:
+        """F2デバッグ時だけ表示する水深グラデーションオーバーレイ。
+
+        浅い=シアン / 中間=青 / 深い=濃紺。slope 高い箇所はオレンジで強調。
+        通常プレイ時には使用しない (_draw_scene で debug_mode 時のみ blit)。
+        """
+        from fishing_spots import get_fishing_spot
+
+        surf = pygame.Surface((WORLD_W, SCREEN_H), pygame.SRCALPHA)
+        tr = self.terrain
+        if not tr.cells:
+            self._depth_debug_surf = surf
+            return
+
+        spot = get_fishing_spot(self.spot_id)
+        min_depth = spot.base_depth_m
+        max_depth = spot.max_depth_m
+        depth_range = max(0.1, max_depth - min_depth)
+        water_h = WATER_NEAR_Y - WATER_Y0
+        cell_w = WORLD_W / tr.grid_cols
+        cell_h = water_h / tr.grid_rows
+
+        for row in range(tr.grid_rows):
+            y0 = int(WATER_Y0 + row * cell_h)
+            y1 = min(int(WATER_Y0 + (row + 1) * cell_h) + 1, WATER_NEAR_Y)
+            if y1 <= y0:
+                continue
+            for col in range(tr.grid_cols):
+                x0 = int(col * cell_w)
+                x1 = int((col + 1) * cell_w) + 1
+                tc = tr.cell(col, row)
+                t = max(0.0, min(1.0, (tc.depth_m - min_depth) / depth_range))
+                # 浅い(t=0): シアン / 中間(t=0.5): 青 / 深い(t=1): 濃紺
+                if t < 0.5:
+                    k = t / 0.5
+                    r_v = int(80 * (1.0 - k) + 40 * k)
+                    g_v = int(220 * (1.0 - k) + 110 * k)
+                    b_v = int(230 * (1.0 - k) + 220 * k)
+                    alpha = int(90 + k * 5)
+                else:
+                    k = (t - 0.5) / 0.5
+                    r_v = int(40 * (1.0 - k) + 20 * k)
+                    g_v = int(110 * (1.0 - k) + 20 * k)
+                    b_v = int(220 * (1.0 - k) + 120 * k)
+                    alpha = int(95 + k * 15)
+                surf.fill((r_v, g_v, b_v, alpha), (x0, y0, x1 - x0, y1 - y0))
+                # slope 強調 (オレンジ): ブレイクラインを可視化
+                if tc.slope > 0.35:
+                    over_a = int(70 * min(1.0, (tc.slope - 0.35) / 0.65))
+                    surf.fill((255, 190, 40, over_a), (x0, y0, x1 - x0, y1 - y0))
+                # グリッド線 (非常に薄い)
+                pygame.draw.line(surf, (255, 255, 255, 20), (x0, y0), (x0, y1 - 1))
+                pygame.draw.line(surf, (255, 255, 255, 20), (x0, y0), (x1 - 1, y0))
+
+        self._depth_debug_surf = surf
+
     def _build_field_struct_surf(self) -> None:
         """釣りビュー内のストラクチャー描画 (常時表示) を事前生成する。
 
@@ -454,7 +570,7 @@ class FishingView:
         surf = pygame.Surface((WORLD_W, SCREEN_H), pygame.SRCALPHA)
 
         for cy in range(UW_H):
-            scale = 0.35 + 0.65 * (cy / (UW_H - 1))   # 奥=小さく 手前=大きく
+            scale = (0.35 + 0.65 * (cy / (UW_H - 1))) * SIZE_BOOST
             for cx in range(UW_W):
                 cell = self.uw_map.cell(cx, cy)
                 sx, sy = self._uw_to_world(cx, cy)
@@ -773,10 +889,15 @@ class FishingView:
         # ── 足場移動 (A/D)。キャスト前のみ。立ち位置でアプローチ角が決まる ──
         move = (1 if keys[pygame.K_d] else 0) - (1 if keys[pygame.K_a] else 0)
         if move != 0:
+            old_stance_x = self.player_stance_x
             self.player_stance_x = max(
                 TU.STANCE_MIN,
                 min(TU.STANCE_MAX,
                     self.player_stance_x + move * TU.STANCE_MOVE_SPEED))
+            # キャストカーソルを立ち位置と連動させる (見失い防止)
+            actual_dx = self.player_stance_x - old_stance_x
+            self.cast_cursor_x = max(0.0, min(float(UW_W - 1),
+                self.cast_cursor_x + actual_dx * (UW_W - 1)))
 
         # ── キャストカーソル移動 (十字キー) ──
         cdx = (1 if keys[pygame.K_RIGHT] else 0) - (1 if keys[pygame.K_LEFT] else 0)
@@ -1652,7 +1773,24 @@ class FishingView:
     # ══════════════════════════════════════════════════════════════════
 
     def draw(self, surface: pygame.Surface) -> None:
-        self._draw_scene(surface)
+        # Stage 1: full_off — draw scene at full viewport resolution
+        self._full_off.fill(C_BLACK)
+        self._draw_scene(self._full_off)
+
+        # Stage 2: pix_off — downscale entire full_off by PIX_DIV
+        pix_w = MAIN_W // PIX_DIV    # 330
+        pix_h = SCREEN_H // PIX_DIV  # 240
+        pygame.transform.scale(self._full_off, (pix_w, pix_h), self._pix_off)
+
+        # Stage 3: crop ZOOM_W worth from pix_off (camera-aware), scale to screen
+        # Use explicit surface + blit instead of subsurface to avoid SRCALPHA alpha=0 bug
+        src_x = max(0, min(int(self.cam_x) // PIX_DIV, pix_w - ZOOM_W // PIX_DIV))
+        src_rect = pygame.Rect(src_x, 0, ZOOM_W // PIX_DIV, pix_h)
+        self._pix_crop.blit(self._pix_off, (0, 0), src_rect)
+        pygame.transform.scale(self._pix_crop, (MAIN_W, SCREEN_H), self._zoomed)
+        surface.blit(self._zoomed, (0, 0))
+
+        # Stage 4: UI overlays drawn directly to surface (stays sharp)
         self._draw_sidebar(surface)
         self._draw_hud(surface)
         if self.state == FS_FIGHT:
@@ -1689,6 +1827,11 @@ class FishingView:
                 pygame.draw.line(surface, (wr+18,wg+18,wb+18), (0,y+1),(MAIN_W-1,y+1), 1)
         # Foreground water
         pygame.draw.rect(surface, (12,45,110), (0, WATER_NEAR_Y, MAIN_W, SCREEN_H-WATER_NEAR_Y))
+
+        # ── F2デバッグ時のみ水深グラデーション表示 ──────────────────────
+        # 通常プレイ時は水深を色で見せない (ポイント探索のゲーム性を守る)。
+        if self.debug_mode and self._depth_debug_surf is not None:
+            surface.blit(self._depth_debug_surf, (int(-self.cam_x), 0))
 
         # ── ストラクチャー常時表示 (水中の影 + 水上の立ち木/岩/ウィード) ──
         # Exploration v2: 世界幅で構築し、カメラぶん左へずらして描く。
@@ -2555,7 +2698,40 @@ class FishingView:
             surface.blit(self.font_sm.render(f"  ({bx:2d},{by:2d}) {s:.1f}",True,C_WHITE),
                          (SIDEBAR_X+18,y+18+i*18))
         y += 18+5*18+8
+        self._draw_terrain_debug(surface, y)
+        y += 7*18+8
         self._draw_catch_log(surface, y)
+
+    def _draw_terrain_debug(self, surface, base_y):
+        """デバッグ: terrain grid 情報 + カーソルセルの水深データ (サイドバー内)。"""
+        if not self.font_sm:
+            return
+        from fishing_spots import get_fishing_spot
+        tr = self.terrain
+        spot = get_fishing_spot(self.spot_id)
+        lines: list = [
+            (f"Terrain: {tr.spot_id}", C_YELLOW),
+            (f"  profile {spot.depth_profile}", (180, 180, 100)),
+            (f"  depth   {spot.base_depth_m:.1f}–{spot.max_depth_m:.1f}m", C_WHITE),
+        ]
+        hcx, hcy = self._get_hovered_grid_cell()
+        if hcx is not None:
+            c = min(tr.grid_cols - 1, max(0, hcx))
+            r = min(tr.grid_rows - 1, max(0, hcy))
+            tc = tr.cell(c, r)
+            slope_col = (255, 190, 40) if tc.slope > 0.35 else C_WHITE
+            lines += [
+                (f"  cell ({c},{r})", C_YELLOW),
+                (f"  depth  {tc.depth_m:.2f}m", C_WHITE),
+                (f"  slope  {tc.slope:.2f}", slope_col),
+                (f"  cover  {tc.cover:.2f}", C_WHITE),
+                (f"  shade  {tc.shade:.2f}", C_WHITE),
+                (f"  snag   {tc.snag:.2f}", C_WHITE),
+            ]
+        else:
+            lines += [("  (hover grid cell)", (100, 100, 100))]
+        for j, (txt, col) in enumerate(lines):
+            surface.blit(self.font_sm.render(txt, True, col), (SIDEBAR_X + 10, base_y + j * 18))
 
     def _draw_catch_log(self, surface, base_y):
         if not self.font or not self.font_sm: return
@@ -2588,6 +2764,9 @@ class FishingView:
     def _draw_status_panel(self, surface: pygame.Surface) -> None:
         """Lure Type / Action / Depth / Match / Fish Reaction / Bite Window."""
         if not self.font or not self.font_sm:
+            return
+        if self.is_mobile:
+            self._draw_status_panel_mobile(surface)
             return
 
         # 左上に配置 (中央のロッドと重ならないように)
@@ -2711,6 +2890,75 @@ class FishingView:
         if hint:
             surface.blit(self.font_sm.render(hint, True, (200,200,200)), (PX+6, y+18))
 
+    def _draw_status_panel_mobile(self, surface: pygame.Surface) -> None:
+        """スマホ用簡易HUD: Lure / Match / Bite Window / Fish Reaction (最大3件)。
+
+        左上パネルを PH≈88px に抑え、釣り場の視野を最大化する。
+        Natural/Appeal バー・操作説明・5匹横並び Fish Reaction は省略。
+        """
+        if not self.font_sm:
+            return
+
+        PX, PY, PW, PH = 6, 36, 332, 88
+
+        bg = pygame.Surface((PW, PH), pygame.SRCALPHA)
+        bg.fill((0, 0, 0, 160))
+        surface.blit(bg, (PX, PY))
+        pygame.draw.rect(surface, (60, 60, 60), (PX, PY, PW, PH), 1)
+
+        y = PY + 5
+        spec = get_spec_by_idx(self._lure_idx)
+
+        # Row 1: ルアー名 + 深度
+        lure_label = f"[{self._lure_idx + 1}] {spec.name}"
+        surface.blit(self.font_sm.render(lure_label, True, spec.color), (PX + 6, y))
+        if self.lure.in_water:
+            ds = self.font_sm.render(f"{self.lure.depth:.1f}m", True, C_WHITE)
+            surface.blit(ds, (PX + PW - ds.get_width() - 6, y))
+        y += 20
+
+        # Row 2: Match
+        match = self._lure_match()
+        mc = C_GREEN if match >= 0.80 else (C_YELLOW if match >= 0.55 else C_RED)
+        surface.blit(self.font_sm.render("Match", True, C_GRAY), (PX + 6, y))
+        _draw_bar(surface, PX + 58, y + 2, 200, 10, match, mc)
+        surface.blit(self.font_sm.render(f"{match:.0%}", True, mc), (PX + 264, y))
+        y += 18
+
+        # Row 3: Bite Window
+        bc = self._bite_charge
+        if bc < 0.50:
+            bar_col = (50, 200, 80)
+        elif bc < 0.75:
+            bar_col = (230, 180, 30)
+        else:
+            pulse = (self._frame_count % 16) < 8
+            bar_col = (255, 80, 40) if pulse else (200, 50, 20)
+        surface.blit(self.font_sm.render("BW", True, C_GRAY), (PX + 6, y))
+        _draw_bar(surface, PX + 30, y + 2, 228, 10, bc, bar_col)
+        surface.blit(self.font_sm.render(f"{bc * 100:.0f}%", True, C_WHITE), (PX + 264, y))
+        y += 18
+
+        # Row 4: Fish Reaction ドット (最大3件)
+        visible_fish = sorted(
+            [f for f in self.fishes if f.state != FISH_CAUGHT],
+            key=lambda f: REACTION_PRIORITY.get(f.state, 0),
+            reverse=True,
+        )
+        slot_w = 108
+        for i, fish in enumerate(visible_fish[:3]):
+            sx = PX + 6 + i * slot_w
+            col = _REACT_COLOR.get(fish.state, C_GRAY)
+            pygame.draw.circle(surface, col, (sx + 5, y + 7), 4)
+            if fish.state == REACT_BITE:
+                if (self._frame_count % 20) < 10:
+                    pygame.draw.circle(surface, C_WHITE, (sx + 5, y + 7), 6, 1)
+            rlbl = _REACT_LABEL.get(fish.state, "?")
+            surface.blit(
+                self.font_sm.render(f"{fish.size:.0f}cm {rlbl}", True, col),
+                (sx + 13, y),
+            )
+
     # ── HUD (top overlay + bottom hints) ─────────────────────────────
 
     def _draw_hud(self, surface: pygame.Surface) -> None:
@@ -2718,7 +2966,7 @@ class FishingView:
 
         # Spot info (top-left)
         surface.blit(self.font.render(f"[ {self.spot_name} ]", True, C_WHITE), (10,10))
-        if self.spot_label:
+        if self.spot_label and not self.is_mobile:
             surface.blit(self.font_sm.render(self.spot_label, True, C_GRAY), (10,36))
 
         # F4 テストモード表示
@@ -2727,30 +2975,31 @@ class FishingView:
                 "[F4 TEST] big fish spawned (52/58/64cm)", True, (255, 120, 220))
             surface.blit(tm, (10, 108))
 
-        # State hint
-        hints = {
-            FS_IDLE:         "Arrows:Aim cast  A/D:Move footing  Hold LMB:charge, release:throw  |  1-6:lure",
-            FS_CAST_CHARGE:  "Release LMB in the GREEN zone!",
-            FS_RETRIEVE:     "LMB:Reel (tap=creep, mash=fast)  Arrows:Rod (v=twitch/lift ^=fall <>=steer)",
-            FS_BITE:         "> Press DOWN to hookset!",
-            FS_WEIGHT:       "> Weight loading... feel the tip, then set!",
-            FS_LINE_RUN:     "> LINE RUNNING — Press DOWN to hookset!",
-            FS_FIGHT:        "Arrows: rod control  LMB: reel  |  manage tension!",
-            FS_KEEP_RELEASE: "[K] KEEP  /  [R] RELEASE",
-            FS_RESULT:       "",
-        }
-        hint = hints.get(self.state,"")
-        if hint:
-            surface.blit(self.font_sm.render(hint, True, C_YELLOW), (10,55))
+        if not self.is_mobile:
+            # State hint (PC向け操作説明)
+            hints = {
+                FS_IDLE:         "Arrows:Aim cast  A/D:Move footing  Hold LMB:charge, release:throw  |  1-6:lure",
+                FS_CAST_CHARGE:  "Release LMB in the GREEN zone!",
+                FS_RETRIEVE:     "LMB:Reel (tap=creep, mash=fast)  Arrows:Rod (v=twitch/lift ^=fall <>=steer)",
+                FS_BITE:         "> Press DOWN to hookset!",
+                FS_WEIGHT:       "> Weight loading... feel the tip, then set!",
+                FS_LINE_RUN:     "> LINE RUNNING — Press DOWN to hookset!",
+                FS_FIGHT:        "Arrows: rod control  LMB: reel  |  manage tension!",
+                FS_KEEP_RELEASE: "[K] KEEP  /  [R] RELEASE",
+                FS_RESULT:       "",
+            }
+            hint = hints.get(self.state, "")
+            if hint:
+                surface.blit(self.font_sm.render(hint, True, C_YELLOW), (10, 55))
 
-        # Cast deviation
-        if self._intended_timer > 0 and self._intended_pos and self.lure.in_water:
-            dev = math.sqrt((self.lure.x - self._intended_pos[0])**2 +
-                            (self.lure.y - self._intended_pos[1])**2)
-            surface.blit(
-                self.font_sm.render(f"Cast deviation: {dev:.1f} cells", True, (200,200,100)),
-                (10,72),
-            )
+            # Cast deviation
+            if self._intended_timer > 0 and self._intended_pos and self.lure.in_water:
+                dev = math.sqrt((self.lure.x - self._intended_pos[0])**2 +
+                                (self.lure.y - self._intended_pos[1])**2)
+                surface.blit(
+                    self.font_sm.render(f"Cast deviation: {dev:.1f} cells", True, (200,200,100)),
+                    (10, 72),
+                )
 
         # Pin-spot quality (only when lure is in water)
         if self.lure.in_water:
@@ -2792,35 +3041,37 @@ class FishingView:
             )
 
         # Bottom hints
-        surface.blit(
-            self.font_sm.render("D: debug" + (" ON" if self.debug_mode else ""), True, (170,170,170)),
-            (10, SCREEN_H-42),
-        )
+        if not self.is_mobile:
+            surface.blit(
+                self.font_sm.render("D: debug" + (" ON" if self.debug_mode else ""), True, (170,170,170)),
+                (10, SCREEN_H-42),
+            )
         surface.blit(
             self.font_sm.render("ESC: back to map", True, C_GRAY),
             (10, SCREEN_H-24),
         )
 
-        # ── Lure key strip (bottom-right area) ───────────────────────
-        strip_x = 600
-        strip_y = SCREEN_H - 42
-        for i, spec in enumerate(LURE_CATALOG):
-            is_cur = (i == self._lure_idx)
-            lbl   = f"{i+1}:{spec.name[:4]}"
-            col   = spec.color if is_cur else (100, 100, 100)
-            ts    = self.font_sm.render(lbl, True, col)
-            bx    = strip_x + i * 62
-            if is_cur:
-                pygame.draw.rect(surface, (40, 40, 60), (bx - 2, strip_y - 2, ts.get_width()+4, ts.get_height()+4))
-                pygame.draw.rect(surface, spec.color,   (bx - 2, strip_y - 2, ts.get_width()+4, ts.get_height()+4), 1)
-            surface.blit(ts, (bx, strip_y))
+        if not self.is_mobile:
+            # ── Lure key strip (bottom-right area, PC only) ───────────────────────
+            strip_x = 600
+            strip_y = SCREEN_H - 42
+            for i, spec in enumerate(LURE_CATALOG):
+                is_cur = (i == self._lure_idx)
+                lbl   = f"{i+1}:{spec.name[:4]}"
+                col   = spec.color if is_cur else (100, 100, 100)
+                ts    = self.font_sm.render(lbl, True, col)
+                bx    = strip_x + i * 62
+                if is_cur:
+                    pygame.draw.rect(surface, (40, 40, 60), (bx - 2, strip_y - 2, ts.get_width()+4, ts.get_height()+4))
+                    pygame.draw.rect(surface, spec.color,   (bx - 2, strip_y - 2, ts.get_width()+4, ts.get_height()+4), 1)
+                surface.blit(ts, (bx, strip_y))
 
-        # Second strip line: Match % for current lure
-        match  = self._lure_match()
-        mcol   = C_GREEN if match >= 0.80 else (C_YELLOW if match >= 0.55 else C_RED)
-        cur_spec = get_spec_by_idx(self._lure_idx)
-        mline  = (
-            f"{cur_spec.name}  Depth {self.lure.depth:.1f}m  Match {match:.0%}"
-        )
-        msurf  = self.font_sm.render(mline, True, mcol)
-        surface.blit(msurf, (strip_x, strip_y + 18))
+            # Second strip line: Match % for current lure
+            match  = self._lure_match()
+            mcol   = C_GREEN if match >= 0.80 else (C_YELLOW if match >= 0.55 else C_RED)
+            cur_spec = get_spec_by_idx(self._lure_idx)
+            mline  = (
+                f"{cur_spec.name}  Depth {self.lure.depth:.1f}m  Match {match:.0%}"
+            )
+            msurf  = self.font_sm.render(mline, True, mcol)
+            surface.blit(msurf, (strip_x, strip_y + 18))

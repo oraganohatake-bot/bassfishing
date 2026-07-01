@@ -142,7 +142,7 @@ ROD_FIGHT_BEND_FLOOR  = 0.42
 # ── 足場移動 (キャスト前のみ) / キャストカーソル ────────────────────
 # Exploration v2: 釣りビューを横1.5xに拡張。岸の端まで立てるよう可動域を広げ、
 # 移動距離が増えたぶん歩行速度も少し上げて移動を快適にした。
-STANCE_MOVE_SPEED = 0.006   # ←→/A・D で動く player_stance_x の速度 (/frame)
+STANCE_MOVE_SPEED = 0.003   # ←→/A・D で動く player_stance_x の速度 (/frame)
 STANCE_MIN        = 0.05    # 足場移動の左端 (岸の端近くまで)
 STANCE_MAX        = 0.95    # 足場移動の右端 (岸の端近くまで)
 CAST_CURSOR_SPEED = 0.30    # 十字キーでのキャストカーソル移動速度 (セル/frame)

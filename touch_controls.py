@@ -127,10 +127,10 @@ class TouchControls:
         # ルアー切替UI (画面下部中央): ◀ で前, ▶ で次のルアーへ。中央に現在名を表示。
         # key は持たず、押下時に 1〜6 キー相当のイベントを post して既存処理を再利用。
         _LU = dict(modes={"fishing"}, fish_states=_LURE_STATES)
-        self.lure_prev = _Button((470, 648, 70, 60), "◀", None, **_LU)
-        self.lure_next = _Button((740, 648, 70, 60), "▶", None, **_LU)
-        # 名前プレートの矩形 (当たり判定なし, 描画専用)
-        self.lure_plate = pygame.Rect(548, 648, 184, 60)
+        self.lure_prev = _Button((470, 658, 70, 60), "◀", None, **_LU)
+        self.lure_next = _Button((740, 658, 70, 60), "▶", None, **_LU)
+        # 名前プレートの矩形 (当たり判定なし, 描画専用) — ボタンより少し小さく中央寄せ
+        self.lure_plate = pygame.Rect(548, 661, 164, 52)
 
     @property
     def _reel_held(self) -> bool:

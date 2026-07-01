@@ -13,7 +13,9 @@ from typing import List, Tuple
 from constants import (
     UW_W, UW_H, FISHING_VIEW_WIDTH_SCALE,
     TERRAIN_FLAT, TERRAIN_WEED, TERRAIN_COVER, TERRAIN_BREAK, TERRAIN_ROCK,
+    DIR_NONE,
 )
+from structure_objects import cell_params as _cell_params
 
 
 def _scale_count(n: int) -> int:
@@ -26,7 +28,11 @@ def _scale_count(n: int) -> int:
 
 
 class UnderwaterCell:
-    __slots__ = ("depth", "terrain", "weed", "cover", "bait", "log_id")
+    __slots__ = (
+        "depth", "terrain", "weed", "cover", "bait", "log_id",
+        # Phase A: 地形システム土台 — structure_objects / fishing_terrain から参照
+        "blocking", "snag_weight", "weak_dir",
+    )
 
     def __init__(self) -> None:
         self.depth: float = 1.0
@@ -34,7 +40,11 @@ class UnderwaterCell:
         self.weed: bool = False
         self.cover: bool = False
         self.bait: int = 0
-        self.log_id: int = -1  # TERRAIN_COVER クラスター ID (-1 = 未所属)
+        self.log_id: int = -1    # TERRAIN_COVER クラスター ID (-1 = 未所属)
+        # Phase A: 根がかり / ライン干渉用パラメータ (_apply_snag_params で設定)
+        self.blocking:    bool  = False
+        self.snag_weight: float = 0.0
+        self.weak_dir:    int   = DIR_NONE
 
     @property
     def holding_score(self) -> float:
@@ -85,6 +95,8 @@ class UnderwaterMap:
         )
         self._place_breaks(cfg.get("break_lines", 1))
         self._scatter_bait(_scale_count(cfg.get("bait_count", 15)))
+        # Phase A: 全セルの根がかり/ブロックパラメータを terrain から一括設定
+        self._apply_snag_params()
 
     # ------------------------------------------------------------------
     # Depth profiles
@@ -208,6 +220,19 @@ class UnderwaterMap:
             bx = self._rng.randint(0, W - 1)
             by = self._rng.randint(0, H - 1)
             self.cells[by][bx].bait = self._rng.randint(1, 3)
+
+    def _apply_snag_params(self) -> None:
+        """Phase A: terrain フラグから blocking / snag_weight / weak_dir を一括設定。
+
+        配置系メソッド (_place_cover 等) が完了した後に呼ぶ。
+        structure_objects.cell_params() が単一の正規化ロジックを持つ。
+        """
+        for row in self.cells:
+            for cell in row:
+                p = _cell_params(cell.terrain, cell.cover, cell.weed)
+                cell.blocking    = p.blocking
+                cell.snag_weight = p.snag_weight
+                cell.weak_dir    = p.weak_dir
 
     # ------------------------------------------------------------------
     # Public queries

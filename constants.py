@@ -130,3 +130,16 @@ C_FISH_NOTICE   = (200, 185,  50)
 C_FISH_APPROACH = (230, 130,  20)
 C_FISH_BITE_COL = (255,  40,  40)
 C_FISH_SPOOK    = (160,  50, 220)
+
+# Rendering zoom / pixel-art pipeline
+ZOOM_W     = 700   # 世界の何px分を表示するか（小さいほどズームイン）
+PIX_DIV    = 2     # 縮小率（1/2解像度→2倍拡大でドット感）
+SIZE_BOOST = 1.45  # pscale に掛けるサイズ倍率
+
+# ── Structure interaction directions ─────────────────────────────────
+# weak_dir: 根がかりから外れやすい引っ張り方向。DIR_NONE = 特定方向なし。
+DIR_NONE  = -1   # 外れやすい方向なし (岩など)
+DIR_UP    =  0   # 奥方向 (far shore)
+DIR_DOWN  =  1   # 手前 (near player)
+DIR_LEFT  =  2
+DIR_RIGHT =  3
