@@ -547,9 +547,10 @@ class FishingView:
                     b_v = int(220 * (1.0 - k) + 120 * k)
                     alpha = int(95 + k * 15)
                 surf.fill((r_v, g_v, b_v, alpha), (x0, y0, x1 - x0, y1 - y0))
-                # slope 強調 (オレンジ): ブレイクラインを可視化
-                if tc.slope > 0.35:
-                    over_a = int(70 * min(1.0, (tc.slope - 0.35) / 0.65))
+                # slope 強調 (オレンジ): 駆け上がりを薄く広めに示す。
+                # 細い1セル幅の線で溝のように見せないよう alpha を抑える。
+                if tc.slope > 0.25:
+                    over_a = int(min(22, tc.slope * 22))
                     surf.fill((255, 190, 40, over_a), (x0, y0, x1 - x0, y1 - y0))
                 # グリッド線 (非常に薄い)
                 pygame.draw.line(surf, (255, 255, 255, 20), (x0, y0), (x0, y1 - 1))

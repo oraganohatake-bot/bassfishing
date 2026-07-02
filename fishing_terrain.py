@@ -93,6 +93,14 @@ class FishingTerrain:
 
 # ── depth_profile 別の水深生成 ────────────────────────────────────
 
+def _smoothstep(edge0: float, edge1: float, x: float) -> float:
+    """edge0→edge1 の間を 0.0→1.0 になめらかに補間する。"""
+    if edge1 == edge0:
+        return 0.0 if x < edge0 else 1.0
+    t = max(0.0, min(1.0, (x - edge0) / (edge1 - edge0)))
+    return t * t * (3.0 - 2.0 * t)
+
+
 def _profile_depth(
     row: int, col: int,
     grid_rows: int, grid_cols: int,
@@ -127,7 +135,9 @@ def _profile_depth(
         return max(base * 0.5, base_d + depth_span * far_t * col_noise * 0.55)
 
     elif profile == "steep_break":
-        # ブレイクラインを col ごとにずらして直線帯を防ぐ
+        # 曲がった駆け上がり/落ち込み。
+        # ブレイクライン「自体」を暗くせず、ラインを境に奥側を深くする。
+        # 溝(細い深い帯)を作らないため smoothstep で面として移行させる。
         phase = (col * 0.35 + seed * 1.618)
         col_hash = (col * 7 + seed * 13) % 11
         break_far_t = (
@@ -137,14 +147,14 @@ def _profile_depth(
         )
         break_far_t = max(0.30, min(0.70, break_far_t))
 
-        if far_t < break_far_t:
-            ratio = far_t / break_far_t
-            return base + depth_span * ratio * 0.28
-        else:
-            break_start = base + depth_span * 0.14
-            k = (far_t - break_far_t) / max(0.01, 1.0 - break_far_t)
-            base_d = break_start + (max_d - break_start) * k
-            return max(base * 0.5, base_d + depth_span * col_noise * 0.25)
+        shallow_depth = base + depth_span * 0.20   # 手前の浅いフラット
+        deep_depth    = max_d                       # 奥の深い側
+        transition_width = 0.16                     # 移行帯のなだらかさ
+
+        s = _smoothstep(break_far_t - transition_width,
+                        break_far_t + transition_width, far_t)
+        depth = shallow_depth * (1.0 - s) + deep_depth * s
+        return max(base * 0.5, depth + depth_span * col_noise * 0.20)
 
     elif profile == "deep_edge":
         base_d = base + depth_span * (far_t ** 0.7)
@@ -245,6 +255,15 @@ def build_fishing_terrain(spot_id: str) -> FishingTerrain:
     hc = (seed * 7 % (cols // 2)) + cols // 4
     hr = rows // 4 + (seed * 3 % (rows // 3))
     _apply_ellipse_depth_delta(cells, rows, cols, hc, hr, 2, 2, 0.35)
+
+    # pocket depression 1〜2個: 葦/リリー切れ目の小さな深み。
+    # 横一直線にしないよう列をばらつかせ、浅め側 (手前寄り) に配置する。
+    num_pocket = 1 + (seed % 2)
+    for _ in range(num_pocket):
+        pc = rng_local.randint(cols // 6, cols * 5 // 6)
+        pr = rng_local.randint(rows // 3, rows - 2)
+        p_delta = -(0.15 + rng_local.random() * 0.20)
+        _apply_ellipse_depth_delta(cells, rows, cols, pc, pr, 2, 1, p_delta)
 
     _compute_slopes(cells, rows, cols)
 
