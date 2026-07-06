@@ -74,6 +74,10 @@ CELL_PX    = 8
 UW_GRID_X  = SIDEBAR_X + 12
 UW_GRID_Y  = 46
 
+# Phase D-1: baked structure layer cache (spot_id → Surface)。
+# StructureObject の見た目は spot_id から決定的なので一度焼いたら使い回す。
+_STRUCTURE_LAYER_CACHE: dict = {}
+
 BITE_FRAMES   = 150
 RESULT_FRAMES = 200
 
@@ -363,6 +367,7 @@ class FishingView:
         self._terrain_surf: Optional[pygame.Surface] = None
         self._score_surf:   Optional[pygame.Surface] = None
         self._struct_surf:  Optional[pygame.Surface] = None  # フィールド内ストラクチャー
+        self._structure_layer: Optional[pygame.Surface] = None  # Phase D-1: StructureObject焼き込みレイヤー
         self._vgauge_surf:  Optional[pygame.Surface] = None  # テンションゲージ(縦グラデ)
         self._depth_tint_surf: Optional[pygame.Surface] = None  # Phase B: 水深濃淡レイヤー (未使用)
         self._depth_debug_surf: Optional[pygame.Surface] = None  # F2デバッグ用水深グラデ
@@ -382,6 +387,7 @@ class FishingView:
         self._build_terrain_surf()
         self._build_score_surf()
         self._build_field_struct_surf()
+        self._structure_layer = self._get_or_build_structure_layer()
         self._build_vgauge_surf()
         self._build_depth_tint_surf()
         self._build_depth_debug_surf()
@@ -619,6 +625,229 @@ class FishingView:
                                      (x0, y1 - 1), (x1, y1 - 1), 1)
 
         self._struct_surf = surf
+
+    # ── Phase D-1: baked structure layer ────────────────────────────────
+    # spot.structures (StructureObject) を一度だけ簡易シルエットで焼き込み、
+    # 毎フレームは blit するだけにする。強化描画は次フェーズ以降。
+
+    _TIER_MULT_D = {"LOW": 0.75, "MID": 1.0, "HERO": 1.25}
+
+    def _get_or_build_structure_layer(self) -> pygame.Surface:
+        """spot_id ごとに structure_layer をキャッシュして返す。"""
+        cached = _STRUCTURE_LAYER_CACHE.get(self.spot_id)
+        if cached is not None:
+            return cached
+        surf = self._build_structure_layer()
+        _STRUCTURE_LAYER_CACHE[self.spot_id] = surf
+        return surf
+
+    def _build_structure_layer(self) -> pygame.Surface:
+        """StructureObject を WORLD_W×SCREEN_H のレイヤーへ簡易シルエット描画。
+
+        座標: struct.x [0..view_width_m] → world_x, struct.y [0..view_depth_m] →
+        WATER_Y0(奥/深) .. WATER_NEAR_Y(手前/浅) へマップ (_bake_structures と同じ向き)。
+        奥ほど小さく薄く、手前ほど大きく濃く。seed 固定で毎回同じ見た目。
+        """
+        surf = pygame.Surface((WORLD_W, SCREEN_H), pygame.SRCALPHA)
+        tr = self.terrain
+        vw = max(0.1, tr.view_width_m)
+        vd = max(0.1, tr.view_depth_m)
+        water_h = WATER_NEAR_Y - WATER_Y0
+
+        drawers = {
+            "stake_cluster": self._sl_stake_cluster,
+            "laydown":       self._sl_laydown,
+            "weed_bed":      self._sl_weed_bed,
+            "reed_bed":      self._sl_reed_bed,
+            "lily_pads":     self._sl_lily_pads,
+            "rock_pile":     self._sl_rock_pile,
+            "stump_field":   self._sl_stump_field,
+            "brush_pile":    self._sl_brush_pile,
+        }
+
+        # 奥 → 手前 の順で描くと手前が上に重なって自然 (y昇順 = 奥から)
+        for st in sorted(tr.structures, key=lambda s: getattr(s, "y", 0.0)):
+            drawer = drawers.get(getattr(st, "type", None))
+            if drawer is None:
+                continue
+            depth_t = max(0.0, min(1.0, st.y / vd))
+            wx = int((st.x / vw) * WORLD_W)
+            wy = int(WATER_Y0 + depth_t * water_h)
+            persp = 0.55 + 0.75 * depth_t                       # 手前=大
+            sc = st.scale * self._TIER_MULT_D.get(st.tier, 1.0) * persp
+            alpha = max(120, min(235, int(150 + depth_t * 70)))  # 手前=濃
+            rng = random.Random(st.seed)
+            drawer(surf, wx, wy, sc, st, rng, alpha)
+
+        return surf
+
+    @staticmethod
+    def _sl_base_shadow(surf, wx, wy, rw, rh, a):
+        """根元の暗い楕円影 (水中馴染ませ)。"""
+        rw = max(2, int(rw)); rh = max(2, int(rh))
+        pygame.draw.ellipse(surf, (8, 24, 42, min(120, a)),
+                            (wx - rw, wy - rh // 2, rw * 2, rh))
+
+    def _sl_stake_cluster(self, surf, wx, wy, sc, st, rng, a):
+        count = max(3, min(7, int(3 + 4 * st.density)))
+        base_h = 26 * sc
+        self._sl_base_shadow(surf, wx, wy, count * 3 * sc, 9, a)
+        for i in range(count):
+            px = wx + int((i - count / 2) * 5 * sc) + rng.randint(-2, 2)
+            h = int(base_h * rng.uniform(0.7, 1.15))
+            w = max(2, int(3 * sc * rng.uniform(0.8, 1.2)))
+            pygame.draw.line(surf, (92, 66, 34, a), (px, wy), (px, wy - h), w)
+            # 下部に水中の青被り
+            pygame.draw.line(surf, (34, 64, 88, int(a * 0.5)),
+                             (px, wy), (px, wy - h // 3), w)
+            pygame.draw.circle(surf, (112, 84, 48, a), (px, wy - h), max(1, w // 2))
+
+    def _sl_laydown(self, surf, wx, wy, sc, st, rng, a):
+        ang = math.radians(st.rotation)
+        length = int(58 * sc)
+        tw = max(3, int(7 * sc))
+        self._sl_base_shadow(surf, wx, wy, 15 * sc, 12, a)
+        root = (wx, wy - int(4 * sc))
+        ex = int(wx + math.cos(ang) * length)
+        ey = int(root[1] - abs(math.sin(ang)) * length * 0.6 - 8 * sc)
+        pygame.draw.line(surf, (74, 52, 28, a), root, (ex, ey), tw)
+        # 枝を2本
+        for k in range(2):
+            t = 0.55 + 0.30 * k
+            bx = int(root[0] + (ex - root[0]) * t)
+            by = int(root[1] + (ey - root[1]) * t)
+            blen = int(20 * sc)
+            bang = ang + math.radians(rng.uniform(-55, -25) if k == 0
+                                      else rng.uniform(25, 55))
+            pygame.draw.line(surf, (74, 52, 28, a), (bx, by),
+                             (int(bx + math.cos(bang) * blen),
+                              int(by - abs(math.sin(bang)) * blen - 6 * sc)),
+                             max(2, tw - 2))
+        # 幹の根元側に水中青被り
+        pygame.draw.line(surf, (34, 64, 88, int(a * 0.45)), root,
+                         (int(root[0] + (ex - root[0]) * 0.4),
+                          int(root[1] + (ey - root[1]) * 0.4)), tw)
+
+    def _sl_weed_bed(self, surf, wx, wy, sc, st, rng, a):
+        clumps = max(2, min(6, int(3 + 3 * st.density)))
+        spread = int(30 * sc)
+        pygame.draw.ellipse(surf, (10, 40, 26, min(90, a)),
+                            (wx - spread, wy - 4, spread * 2, 10))
+        for _c in range(clumps):
+            cxo = rng.randint(-spread, spread)
+            for _b in range(rng.randint(3, 6)):
+                gx = wx + cxo + rng.randint(-4, 4)
+                gh = int((10 + rng.randint(0, 8)) * sc)
+                pygame.draw.line(surf, (48, 120, 58, a),
+                                 (gx, wy), (gx + rng.randint(-3, 3), wy - gh),
+                                 max(1, int(1.5 * sc)))
+
+    def _sl_reed_bed(self, surf, wx, wy, sc, st, rng, a):
+        count = max(5, min(14, int(6 + 8 * st.density)))
+        spread = int(34 * sc)
+        keep = 0.5 + 0.4 * st.density
+        for _i in range(count):
+            if rng.random() > keep:          # 密度ムラ (壁にしない)
+                continue
+            gx = wx + rng.randint(-spread, spread)
+            gh = int((24 + rng.randint(0, 22)) * sc)
+            col = (86, 120, 52, a) if rng.random() < 0.7 else (108, 140, 66, a)
+            pygame.draw.line(surf, col, (gx, wy),
+                             (gx + rng.randint(-2, 2), wy - gh), max(1, int(1.6 * sc)))
+            pygame.draw.line(surf, (150, 140, 70, int(a * 0.8)),
+                             (gx, wy - gh), (gx, wy - gh - int(4 * sc)), 1)
+
+    def _sl_lily_pads(self, surf, wx, wy, sc, st, rng, a):
+        pads = max(3, min(9, int(4 + 5 * st.density)))
+        spread = int(34 * sc)
+        for _i in range(pads):
+            px = wx + rng.randint(-spread, spread)
+            py = wy + rng.randint(-8, 8)
+            pr = int((5 + rng.randint(0, 5)) * sc)
+            if pr < 2:
+                continue
+            # 葉の下の薄い影
+            pygame.draw.ellipse(surf, (8, 30, 40, int(a * 0.4)),
+                                (px - pr, py + 2, pr * 2, pr))
+            pygame.draw.ellipse(surf, (44, 108, 58, a),
+                                (px - pr, py - int(pr * 0.6), pr * 2, int(pr * 1.2)))
+            pygame.draw.ellipse(surf, (70, 140, 80, int(a * 0.7)),
+                                (px - pr, py - int(pr * 0.6), pr, int(pr * 0.6)), 1)
+
+    def _sl_rock_pile(self, surf, wx, wy, sc, st, rng, a):
+        rocks = max(3, min(6, int(3 + 3 * st.density)))
+        spread = int(24 * sc)
+        self._sl_base_shadow(surf, wx, wy, spread * 1.2, 12, a)
+        for _i in range(rocks):
+            rx = wx + rng.randint(-spread, spread)
+            ry = wy - rng.randint(0, int(10 * sc))
+            rr = int((8 + rng.randint(0, 7)) * sc)
+            if rr < 3:
+                continue
+            n = rng.randint(5, 7)
+            pts = []
+            for k in range(n):
+                pa = 2 * math.pi * k / n
+                rad = rr * rng.uniform(0.7, 1.15)
+                pts.append((int(rx + math.cos(pa) * rad),
+                            int(ry - math.sin(pa) * rad * 0.8)))
+            pygame.draw.polygon(surf, (96, 96, 104, a), pts)
+            # 上面ハイライト / 下面影
+            pygame.draw.ellipse(surf, (150, 155, 165, int(a * 0.55)),
+                                (rx - rr, ry - int(rr * 0.8), rr, int(rr * 0.5)))
+            pygame.draw.ellipse(surf, (40, 40, 50, int(a * 0.5)),
+                                (rx - rr // 2, ry + int(rr * 0.2), rr, int(rr * 0.4)))
+
+    def _sl_stump_field(self, surf, wx, wy, sc, st, rng, a):
+        count = max(2, min(6, int(2 + 4 * st.density)))
+        spread = int(30 * sc)
+        for _i in range(count):
+            px = wx + rng.randint(-spread, spread)
+            h = int((10 + rng.randint(0, 8)) * sc)
+            w = max(3, int(6 * sc))
+            pygame.draw.ellipse(surf, (8, 24, 42, int(a * 0.5)),
+                                (px - w, wy - 3, w * 2, 8))
+            pygame.draw.line(surf, (78, 56, 30, a), (px, wy), (px, wy - h), w)
+            pygame.draw.ellipse(surf, (100, 74, 42, a),
+                                (px - w // 2, wy - h - 2, w, 5))
+
+    def _sl_brush_pile(self, surf, wx, wy, sc, st, rng, a):
+        twigs = max(6, min(16, int(7 + 9 * st.density)))
+        spread = int(26 * sc)
+        self._sl_base_shadow(surf, wx, wy, spread, 12, a)
+        for _i in range(twigs):
+            x0 = wx + rng.randint(-spread // 2, spread // 2)
+            y0 = wy - rng.randint(0, int(6 * sc))
+            ln = int((14 + rng.randint(0, 16)) * sc)
+            twang = math.radians(rng.uniform(20, 160))
+            pygame.draw.line(surf, (72, 54, 32, int(a * 0.9)), (x0, y0),
+                             (int(x0 + math.cos(twang) * ln),
+                              int(y0 - math.sin(twang) * ln)),
+                             max(1, int(1.4 * sc)))
+
+    _STRUCT_DBG_LABEL = {
+        "stake_cluster": "stake", "laydown": "laydown", "weed_bed": "weed",
+        "reed_bed": "reed", "lily_pads": "lily", "rock_pile": "rock",
+        "stump_field": "stump", "brush_pile": "brush",
+    }
+
+    def _draw_structure_debug(self, surface: pygame.Surface) -> None:
+        """F2デバッグ: StructureObject 中心にマーカーとラベルを表示。"""
+        tr = self.terrain
+        vw = max(0.1, tr.view_width_m)
+        vd = max(0.1, tr.view_depth_m)
+        water_h = WATER_NEAR_Y - WATER_Y0
+        for st in tr.structures:
+            sx = int((st.x / vw) * WORLD_W - self.cam_x)
+            sy = int(WATER_Y0 + max(0.0, min(1.0, st.y / vd)) * water_h)
+            if not (-20 <= sx <= MAIN_W + 20):
+                continue
+            pygame.draw.circle(surface, (255, 60, 200), (sx, sy), 4)
+            pygame.draw.circle(surface, (255, 255, 255), (sx, sy), 4, 1)
+            if self.font_sm is not None:
+                label = f"{self._STRUCT_DBG_LABEL.get(st.type, st.type)}·{st.tier}"
+                surface.blit(self.font_sm.render(label, True, (255, 200, 240)),
+                             (sx + 6, sy - 8))
 
     def _spawn_fish(self, rng: random.Random) -> list:
         """スポーン: <40cm は群集管理 (ランダム)、≥40cm は個体管理。"""
@@ -1840,6 +2069,15 @@ class FishingView:
         if self._struct_surf is not None:
             surface.blit(self._struct_surf, (int(-self.cam_x), 0))
 
+        # ── Phase D-1: StructureObject レイヤー (spot.structures を焼いたもの) ──
+        # 毎フレーム blit のみ。生成は init_fonts / spot単位キャッシュ済み。
+        if self._structure_layer is not None:
+            surface.blit(self._structure_layer, (int(-self.cam_x), 0))
+
+        # F2デバッグ時のみ StructureObject 中心にマーカー/ラベルを出す
+        if self.debug_mode:
+            self._draw_structure_debug(surface)
+
         # Depth guide lines on water surface (faint horizontals per 0.5m)
         if self.lure.in_water:
             for depth_mark in [0.5, 1.0, 1.5, 2.0]:
@@ -2703,6 +2941,22 @@ class FishingView:
         y += 7*18+8
         self._draw_catch_log(surface, y)
 
+    def _nearest_hotspot(self, col: int, row: int, max_cells: float = 3.0):
+        """(col,row) セルに最も近い hotspot dict を返す。範囲外なら None。"""
+        tr = self.terrain
+        if not tr.hotspots:
+            return None
+        best = None
+        best_d = max_cells
+        for hs in tr.hotspots:
+            hc = hs["x"] / tr.view_width_m * tr.grid_cols
+            hr = hs["y"] / tr.view_depth_m * tr.grid_rows
+            d = ((hc - col) ** 2 + (hr - row) ** 2) ** 0.5
+            if d <= best_d:
+                best_d = d
+                best = hs
+        return best
+
     def _draw_terrain_debug(self, surface, base_y):
         """デバッグ: terrain grid 情報 + カーソルセルの水深データ (サイドバー内)。"""
         if not self.font_sm:
@@ -2728,7 +2982,14 @@ class FishingView:
                 (f"  cover  {tc.cover:.2f}", C_WHITE),
                 (f"  shade  {tc.shade:.2f}", C_WHITE),
                 (f"  snag   {tc.snag:.2f}", C_WHITE),
+                (f"  veg    {tc.vegetation:.2f}", C_WHITE),
+                (f"  hard   {tc.hardness:.2f}", C_WHITE),
+                (f"  ambush {tc.ambush:.2f}", C_WHITE),
+                (f"  bottom {tc.bottom_type}", (170, 170, 170)),
             ]
+            hs = self._nearest_hotspot(c, r)
+            if hs is not None:
+                lines.append((f"  hot: {hs['kind']} {hs['score']:.2f}", (120, 220, 255)))
         else:
             lines += [("  (hover grid cell)", (100, 100, 100))]
         for j, (txt, col) in enumerate(lines):

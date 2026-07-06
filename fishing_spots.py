@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
+from structure_objects import StructureObject
+
 
 # ── FishingSpot: spot_id ベースの固定ビュー定義 ───────────────────────
 # SpotMeta (スポット個性) とは別レイヤー。
@@ -63,6 +65,14 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         grid_cols=32, grid_rows=24,
         base_depth_m=0.8, max_depth_m=3.8,
         depth_profile="steep_break",
+        structures=[
+            StructureObject(type="rock_pile", x=20.0, y=9.0,
+                            scale=1.1, rotation=0.0, density=0.8,
+                            seed=1011, tier="HERO"),
+            StructureObject(type="stake_cluster", x=8.0, y=16.0,
+                            scale=1.0, rotation=0.0, density=0.7,
+                            seed=1012, tier="MID"),
+        ],
     ),
     "spot_02": FishingSpot(
         spot_id="spot_02", name="NE Weed Flat",
@@ -71,6 +81,17 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         grid_cols=32, grid_rows=24,
         base_depth_m=0.4, max_depth_m=1.2,
         depth_profile="shallow_flat",
+        structures=[
+            StructureObject(type="weed_bed", x=12.0, y=10.0,
+                            scale=1.2, rotation=0.0, density=0.9,
+                            seed=2011, tier="HERO"),
+            StructureObject(type="reed_bed", x=6.0, y=5.0,
+                            scale=1.0, rotation=0.0, density=0.9,
+                            seed=2012, tier="MID"),
+            StructureObject(type="lily_pads", x=23.0, y=7.0,
+                            scale=1.0, rotation=15.0, density=0.8,
+                            seed=2013, tier="MID"),
+        ],
     ),
     "spot_03": FishingSpot(
         spot_id="spot_03", name="East Shore",
@@ -87,6 +108,17 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         grid_cols=32, grid_rows=24,
         base_depth_m=1.0, max_depth_m=2.0,
         depth_profile="normal_slope",
+        structures=[
+            StructureObject(type="laydown", x=18.0, y=15.0,
+                            scale=1.0, rotation=-12.0, density=0.8,
+                            seed=12031, tier="HERO"),
+            StructureObject(type="laydown", x=9.0, y=8.0,
+                            scale=0.8, rotation=20.0, density=0.6,
+                            seed=4041, tier="MID"),
+            StructureObject(type="stump_field", x=24.0, y=18.0,
+                            scale=1.0, rotation=0.0, density=0.7,
+                            seed=4042, tier="LOW"),
+        ],
     ),
     "spot_05": FishingSpot(
         spot_id="spot_05", name="South Flat",
@@ -103,6 +135,14 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         grid_cols=32, grid_rows=24,
         base_depth_m=0.8, max_depth_m=2.2,
         depth_profile="shallow_flat",
+        structures=[
+            StructureObject(type="brush_pile", x=14.0, y=12.0,
+                            scale=1.1, rotation=0.0, density=0.85,
+                            seed=6011, tier="HERO"),
+            StructureObject(type="laydown", x=22.0, y=16.0,
+                            scale=0.9, rotation=8.0, density=0.7,
+                            seed=6012, tier="MID"),
+        ],
     ),
     "spot_07": FishingSpot(
         spot_id="spot_07", name="West Bank",
@@ -135,6 +175,17 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         grid_cols=32, grid_rows=24,
         base_depth_m=1.5, max_depth_m=3.5,
         depth_profile="steep_break",
+        structures=[
+            StructureObject(type="rock_pile", x=15.0, y=10.0,
+                            scale=1.3, rotation=0.0, density=0.9,
+                            seed=1001, tier="HERO"),
+            StructureObject(type="rock_pile", x=24.0, y=14.0,
+                            scale=0.9, rotation=0.0, density=0.7,
+                            seed=1002, tier="MID"),
+            StructureObject(type="stake_cluster", x=6.0, y=17.0,
+                            scale=1.0, rotation=0.0, density=0.7,
+                            seed=1003, tier="LOW"),
+        ],
     ),
 }
 

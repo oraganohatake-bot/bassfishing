@@ -33,9 +33,11 @@ class TerrainCell:
 
     Attributes
     ----------
-    depth_m       : このセルの実水深 [m]
+    depth_m       : このセルの実水深 [m] (= base_depth_m + depth_delta_m, 最低 0.2m)
     base_depth_m  : プロファイル由来の基本水深 (ストラクチャー補正前)
-    depth_delta_m : ストラクチャーによる水深変化 [m] (Phase C で使用)
+    depth_delta_m : ストラクチャー/局所地形による水深変化 [m]。
+                    符号仕様: depth_delta_m > 0 → 深くなる (えぐれ/洗掘/ポケット)
+                              depth_delta_m < 0 → 浅くなる (盛り上がり/ハンプ)
     slope         : 隣接セルとの水深差の最大値を正規化 (0.0–1.0)
     cover         : カバー密度 0.0–1.0 (Phase C)
     shade         : 影響度 0.0–1.0 (Phase C)
@@ -72,8 +74,11 @@ class FishingTerrain:
     view_width_m : ビューの横幅 [m]
     view_depth_m : ビューの縦幅 [m]
     cells        : cells[row][col] = TerrainCell
-    hotspots     : 高スコアセル候補 [(col, row), ...]
+    hotspots     : StructureObject 由来の付き場候補 [dict, ...]
+                   (kind / x / y / score / preferred_lures / risk / source)
     structures   : StructureObject リスト (Phase D で描画)
+    min_depth_m  : グリッド内の最小水深 [m] (ストラクチャー補正後)
+    max_depth_m  : グリッド内の最大水深 [m] (ストラクチャー補正後)
     """
     spot_id:      str
     grid_cols:    int
@@ -81,8 +86,10 @@ class FishingTerrain:
     view_width_m: float
     view_depth_m: float
     cells:        List[List[TerrainCell]] = field(default_factory=list)
-    hotspots:     List[Tuple[int, int]]  = field(default_factory=list)
-    structures:   List                   = field(default_factory=list)
+    hotspots:     List[dict]              = field(default_factory=list)
+    structures:   List                    = field(default_factory=list)
+    min_depth_m:  float                   = 0.2
+    max_depth_m:  float                   = 1.0
 
     def cell(self, col: int, row: int) -> TerrainCell:
         """境界クランプ付きセルアクセス。"""
@@ -174,7 +181,12 @@ def _apply_ellipse_depth_delta(
     radius_col: int, radius_row: int,
     delta_m: float,
 ) -> None:
-    """楕円形の局所的な水深変化をセルに加算する (scour hole / rock hump)。"""
+    """楕円形の局所的な水深変化を depth_delta_m に加算する (scour hole / rock hump)。
+
+    符号仕様: delta_m > 0 → 深くなる / delta_m < 0 → 浅くなる。
+    最終的な depth_m は _finalize_depths() で base_depth_m + depth_delta_m として
+    再計算されるため、ここでは depth_delta_m のみを更新する。
+    """
     r0 = max(0, center_row - radius_row)
     r1 = min(grid_rows, center_row + radius_row + 1)
     c0 = max(0, center_col - radius_col)
@@ -186,7 +198,287 @@ def _apply_ellipse_depth_delta(
             dist = math.sqrt(dr * dr + dc * dc)
             if dist <= 1.0:
                 weight = (1.0 - dist) ** 2
-                cells[r][c].depth_m = max(0.2, cells[r][c].depth_m + delta_m * weight)
+                cells[r][c].depth_delta_m += delta_m * weight
+
+
+# ── StructureObject → influence 焼き込み ─────────────────────────────
+#
+# Phase C: 各スポットに配置された StructureObject を terrain.cells に反映する。
+# 描画 (Phase D) には触れず、cover/shade/snag/vegetation/hardness/ambush と
+# depth_delta_m を楕円状に加算し、hotspots(付き場候補) を生成するだけ。
+
+def apply_radial_influence(
+    terrain: "FishingTerrain",
+    center_col: int,
+    center_row: int,
+    radius_col: float,
+    radius_row: float,
+    values: dict,
+    falloff: str = "smooth",
+) -> None:
+    """楕円範囲のセルに influence 値を加算する。
+
+    中心ほど強く、外周ほど弱く values を加算する。
+    depth_delta_m 以外の数値フィールドは 0.0–1.0 にクランプする。
+    bottom_type は内側 (weight>=0.5) のセルに設定する。
+
+    Parameters
+    ----------
+    center_col, center_row : 中心セル座標
+    radius_col, radius_row : 楕円半径 [cells]
+    values : {"cover":0.7, "shade":0.5, "depth_delta_m":-0.3, "bottom_type":"wood", ...}
+    falloff : "smooth" (smoothstep) | "linear" | "hard"
+    """
+    cells = terrain.cells
+    rows, cols = terrain.grid_rows, terrain.grid_cols
+    rc = max(1.0, float(radius_col))
+    rr = max(1.0, float(radius_row))
+    bottom_type = values.get("bottom_type")
+
+    r0 = max(0, int(center_row - rr))
+    r1 = min(rows, int(center_row + rr) + 1)
+    c0 = max(0, int(center_col - rc))
+    c1 = min(cols, int(center_col + rc) + 1)
+
+    for r in range(r0, r1):
+        for c in range(c0, c1):
+            dr = (r - center_row) / rr
+            dc = (c - center_col) / rc
+            dist = math.sqrt(dr * dr + dc * dc)
+            if dist > 1.0:
+                continue
+            n = 1.0 - dist
+            if falloff == "smooth":
+                w = n * n * (3.0 - 2.0 * n)   # smoothstep(0,1,1-dist)
+            elif falloff == "hard":
+                w = 1.0
+            else:  # linear
+                w = n
+
+            tc = cells[r][c]
+            for key, val in values.items():
+                if key == "bottom_type":
+                    continue
+                cur = getattr(tc, key, None)
+                if cur is None:
+                    continue
+                if key == "depth_delta_m":
+                    tc.depth_delta_m = cur + val * w
+                else:
+                    setattr(tc, key, max(0.0, min(1.0, cur + val * w)))
+            if bottom_type and w >= 0.5:
+                tc.bottom_type = bottom_type
+
+
+# 重要度 tier ごとの強度スケール
+_TIER_MULT: dict = {"HERO": 1.0, "MID": 0.75, "LOW": 0.5}
+
+# ストラクチャー種別 → 影響定義。
+#   radius_m  : (横[m], 奥行[m]) の楕円半径 (scale 倍される)
+#   values    : HERO 相当の加算値。tier / density でスケールされる
+#               depth_delta_m > 0 → 深くなる / < 0 → 浅くなる
+#   outer     : (任意) 本体前に適用する広域 depth_delta (岩周りの深み等)
+#   hotspots  : (kind, dx_m, dy_m, score, [lures], risk) — rotation/scale で配置
+_STRUCT_INFLUENCE: dict = {
+    "laydown": {
+        "radius_m": (4.0, 2.5),
+        "values": {
+            "cover": 0.85, "shade": 0.70, "snag": 0.80,
+            "ambush": 0.90, "vegetation": 0.20, "depth_delta_m": +0.50,  # 根元えぐれ→深い
+            "bottom_type": "wood",
+        },
+        "hotspots": [
+            ("root_hole",  0.0, 0.0, 0.90, ["jig", "worm"],           "snag_high"),
+            ("branch_tip", 3.5, 0.0, 0.75, ["crankbait", "spinnerbait"], "snag_high"),
+            ("shade_line", 0.0, 1.5, 0.70, ["worm", "jig"],           "snag_med"),
+        ],
+    },
+    "stake_cluster": {
+        "radius_m": (1.8, 1.8),
+        "values": {
+            "cover": 0.65, "shade": 0.35, "snag": 0.35,
+            "ambush": 0.55, "depth_delta_m": +0.18,  # 杭の洗掘→深い
+            "bottom_type": "silt",
+        },
+        "hotspots": [
+            ("stake_scour",  0.0,  0.0, 0.70, ["worm", "jig"], "snag_med"),
+            ("outside_post", 1.5, -1.0, 0.60, ["spinnerbait"], "snag_low"),
+        ],
+    },
+    "weed_bed": {
+        "radius_m": (4.0, 3.0),
+        "values": {
+            "vegetation": 0.90, "cover": 0.60, "shade": 0.30,
+            "snag": 0.35, "ambush": 0.45,
+            "bottom_type": "weed",
+        },
+        "hotspots": [
+            ("weed_edge", 3.5, 0.0, 0.65, ["spinnerbait", "crankbait"], "snag_low"),
+        ],
+    },
+    "reed_bed": {
+        "radius_m": (4.5, 3.0),
+        "values": {
+            "vegetation": 0.80, "cover": 0.65, "shade": 0.45,
+            "snag": 0.45, "ambush": 0.60, "depth_delta_m": +0.25,  # 葦の切れ目ポケット→深い
+            "bottom_type": "mud",
+        },
+        "hotspots": [
+            ("reed_gap",     0.0,  0.0, 0.75, ["worm", "jig"],         "snag_med"),
+            ("reed_pocket",  1.5,  1.0, 0.70, ["worm"],                "snag_med"),
+            ("outside_edge", 0.0, -2.5, 0.65, ["spinnerbait", "crankbait"], "snag_low"),
+        ],
+    },
+    "lily_pads": {
+        "radius_m": (3.5, 3.0),
+        "values": {
+            "shade": 0.85, "vegetation": 0.70, "cover": 0.55,
+            "snag": 0.65, "ambush": 0.70, "depth_delta_m": +0.25,  # パッドの穴→深い
+            "bottom_type": "mud",
+        },
+        "hotspots": [
+            ("pad_hole", 0.0, 0.0, 0.80, ["worm", "jig"],        "snag_high"),
+            ("pad_edge", 2.5, 0.0, 0.70, ["topwater", "spinnerbait"], "snag_med"),
+        ],
+    },
+    "rock_pile": {
+        "radius_m": (2.5, 2.0),
+        "outer": {"radius_m": (4.0, 3.0), "depth_delta_m": +0.15},  # 岩周りの深み→深い
+        "values": {
+            "hardness": 0.85, "cover": 0.50, "snag": 0.35,
+            "ambush": 0.50, "depth_delta_m": -0.25,  # 岩本体の盛り上がり→浅い
+            "bottom_type": "rock",
+        },
+        "hotspots": [
+            ("rock_crevice",     0.0, 0.0, 0.75, ["jig", "worm"], "snag_med"),
+            ("hard_bottom_edge", 2.5, 0.0, 0.65, ["crankbait"],   "snag_low"),
+        ],
+    },
+    "stump_field": {
+        "radius_m": (3.0, 2.5),
+        "values": {
+            "cover": 0.50, "snag": 0.50, "ambush": 0.50,
+            "depth_delta_m": +0.10,  # 切り株の洗掘→深い
+            "bottom_type": "wood",
+        },
+        "hotspots": [
+            ("stump_shade", 0.0, 0.0, 0.60, ["jig", "worm"], "snag_med"),
+        ],
+    },
+    "brush_pile": {
+        "radius_m": (2.2, 2.2),
+        "values": {
+            "cover": 0.70, "snag": 0.80, "ambush": 0.60, "shade": 0.30,
+            "bottom_type": "wood",
+        },
+        "hotspots": [
+            ("brush_heart", 0.0, 0.0, 0.65, ["worm", "jig"], "snag_high"),
+        ],
+    },
+}
+
+# influence をクランプ [0,1] するソフト値キー (depth_delta_m は別扱い)
+_SOFT_KEYS = ("cover", "shade", "snag", "vegetation", "hardness", "ambush")
+
+
+def _sattr(struct, name: str, default):
+    """StructureObject / dict 双方から属性を取り出す。"""
+    if isinstance(struct, dict):
+        return struct.get(name, default)
+    return getattr(struct, name, default)
+
+
+def _bake_structures(terrain: "FishingTerrain") -> None:
+    """terrain.structures を cells に焼き込み hotspots を生成する。"""
+    hotspots: List[dict] = []
+    vw = terrain.view_width_m
+    vd = terrain.view_depth_m
+    cols = terrain.grid_cols
+    rows = terrain.grid_rows
+
+    for struct in terrain.structures:
+        stype = _sattr(struct, "type", None)
+        spec = _STRUCT_INFLUENCE.get(stype)
+        if not spec:
+            continue
+
+        sx = float(_sattr(struct, "x", 0.0))
+        sy = float(_sattr(struct, "y", 0.0))
+        scale = float(_sattr(struct, "scale", 1.0))
+        rotation = float(_sattr(struct, "rotation", 0.0))
+        density = float(_sattr(struct, "density", 0.5))
+        tier = _sattr(struct, "tier", "MID")
+        tmult = _TIER_MULT.get(tier, 0.75)
+        dmult = 0.6 + 0.4 * max(0.0, min(1.0, density))
+
+        # 中心セル (メートル → grid)
+        ccol = max(0, min(cols - 1, int(sx / vw * cols)))
+        crow = max(0, min(rows - 1, int(sy / vd * rows)))
+
+        rad_m = spec["radius_m"]
+        rc = rad_m[0] * scale / vw * cols
+        rr = rad_m[1] * scale / vd * rows
+
+        # 岩周りの広域な深み等を本体より先に適用
+        outer = spec.get("outer")
+        if outer:
+            orc = outer["radius_m"][0] * scale / vw * cols
+            orr = outer["radius_m"][1] * scale / vd * rows
+            apply_radial_influence(
+                terrain, ccol, crow, orc, orr,
+                {"depth_delta_m": outer["depth_delta_m"] * tmult},
+                falloff="smooth",
+            )
+
+        # tier / density でスケールした values を作る
+        scaled: dict = {}
+        for key, val in spec["values"].items():
+            if key == "bottom_type":
+                scaled[key] = val
+            elif key == "depth_delta_m":
+                scaled[key] = val * tmult
+            else:
+                scaled[key] = val * tmult * dmult
+        apply_radial_influence(terrain, ccol, crow, rc, rr, scaled, falloff="smooth")
+
+        # hotspots (rotation/scale でオフセットを配置)
+        rot = math.radians(rotation)
+        cos_r, sin_r = math.cos(rot), math.sin(rot)
+        for kind, dx_m, dy_m, base_score, lures, risk in spec["hotspots"]:
+            ox = (dx_m * cos_r - dy_m * sin_r) * scale
+            oy = (dx_m * sin_r + dy_m * cos_r) * scale
+            hx = max(0.0, min(vw, sx + ox))
+            hy = max(0.0, min(vd, sy + oy))
+            score = max(0.0, min(1.0, base_score * (0.75 + 0.25 * tmult)))
+            hotspots.append({
+                "kind": kind,
+                "x": hx,
+                "y": hy,
+                "score": score,
+                "preferred_lures": list(lures),
+                "risk": risk,
+                "source": stype,
+            })
+
+    terrain.hotspots = hotspots
+
+
+def _finalize_depths(
+    cells: List[List[TerrainCell]], grid_rows: int, grid_cols: int
+) -> Tuple[float, float]:
+    """depth_m = clamp(base_depth_m + depth_delta_m, 0.2) を再計算し min/max を返す。"""
+    mn, mx = float("inf"), float("-inf")
+    for r in range(grid_rows):
+        for c in range(grid_cols):
+            tc = cells[r][c]
+            tc.depth_m = max(0.2, tc.base_depth_m + tc.depth_delta_m)
+            if tc.depth_m < mn:
+                mn = tc.depth_m
+            if tc.depth_m > mx:
+                mx = tc.depth_m
+    if mn == float("inf"):
+        mn, mx = 0.2, 1.0
+    return mn, mx
 
 
 # ── slope 計算 ───────────────────────────────────────────────────────
@@ -238,36 +530,36 @@ def build_fishing_terrain(spot_id: str) -> FishingTerrain:
                 spot.base_depth_m, spot.max_depth_m,
                 spot.depth_profile, seed,
             )
+            # base_depth_m はプロファイル純水深。局所/ストラクチャー変化は
+            # depth_delta_m に蓄積し、_finalize_depths で depth_m を再計算する。
             tc = TerrainCell(depth_m=d, base_depth_m=d)
             row.append(tc)
         cells.append(row)
 
     # 局所的な深み/盛り上がり (scour holes / rock humps)
     rng_local = random.Random(seed)
-    # scour hole 1〜2個: 楕円形に少し深くなる
+    # scour hole 1〜2個: 楕円形に少し深くなる (depth_delta_m > 0)
     num_scour = 1 + (seed % 2)
     for _ in range(num_scour):
         fc = rng_local.randint(cols // 5, cols * 4 // 5)
         fr = rng_local.randint(rows // 5, rows * 2 // 3)
-        delta = -(0.30 + rng_local.random() * 0.30)
+        delta = +(0.30 + rng_local.random() * 0.30)
         _apply_ellipse_depth_delta(cells, rows, cols, fc, fr, 3, 2, delta)
-    # rock hump 1個: 局所的に少し浅くなる盛り上がり
+    # rock hump 1個: 局所的に少し浅くなる盛り上がり (depth_delta_m < 0)
     hc = (seed * 7 % (cols // 2)) + cols // 4
     hr = rows // 4 + (seed * 3 % (rows // 3))
-    _apply_ellipse_depth_delta(cells, rows, cols, hc, hr, 2, 2, 0.35)
+    _apply_ellipse_depth_delta(cells, rows, cols, hc, hr, 2, 2, -0.35)
 
-    # pocket depression 1〜2個: 葦/リリー切れ目の小さな深み。
+    # pocket depression 1〜2個: 葦/リリー切れ目の小さな深み (depth_delta_m > 0)。
     # 横一直線にしないよう列をばらつかせ、浅め側 (手前寄り) に配置する。
     num_pocket = 1 + (seed % 2)
     for _ in range(num_pocket):
         pc = rng_local.randint(cols // 6, cols * 5 // 6)
         pr = rng_local.randint(rows // 3, rows - 2)
-        p_delta = -(0.15 + rng_local.random() * 0.20)
+        p_delta = +(0.15 + rng_local.random() * 0.20)
         _apply_ellipse_depth_delta(cells, rows, cols, pc, pr, 2, 1, p_delta)
 
-    _compute_slopes(cells, rows, cols)
-
-    return FishingTerrain(
+    terrain = FishingTerrain(
         spot_id=spot_id,
         grid_cols=cols,
         grid_rows=rows,
@@ -277,6 +569,17 @@ def build_fishing_terrain(spot_id: str) -> FishingTerrain:
         hotspots=[],
         structures=list(spot.structures),
     )
+
+    # StructureObject の水中影響を焼き込む (cover/shade/snag/... + depth_delta_m)
+    _bake_structures(terrain)
+
+    # depth_m を base + delta から再計算 → slope を再計算 → min/max 更新
+    mn, mx = _finalize_depths(cells, rows, cols)
+    terrain.min_depth_m = mn
+    terrain.max_depth_m = mx
+    _compute_slopes(cells, rows, cols)
+
+    return terrain
 
 
 # ── ルアー別 根がかり耐性 (1.0 に近いほど引っかかりにくい) ───────────
