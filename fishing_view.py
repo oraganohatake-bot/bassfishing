@@ -1001,22 +1001,50 @@ class FishingView:
     }
 
     def _draw_structure_debug(self, surface: pygame.Surface) -> None:
-        """F2デバッグ: StructureObject 中心にマーカーとラベルを表示。"""
+        """F2デバッグ: StructureObject 中心にマーカー + type/variant/hotspot を表示。
+
+        D-2.5 診断: stake_cluster は variant (reed_fence / old_pier_remnant) を、
+        構造物ごとに近傍の hotspot 種別 (reed_gap / pad_lane 等) を並べて描く。
+        """
         tr = self.terrain
         vw = max(0.1, tr.view_width_m)
         vd = max(0.1, tr.view_depth_m)
         water_h = WATER_NEAR_Y - WATER_Y0
+        # variant 判定用の reed world 中心 (blit と同じ計算)
+        reed_centers = [
+            (int((float(getattr(s, "x", 0.0)) / vw) * WORLD_W),
+             int(WATER_Y0 + max(0.0, min(1.0, float(getattr(s, "y", 0.0)) / vd)) * water_h))
+            for s in tr.structures if getattr(s, "type", None) == "reed_bed"
+        ]
         for st in tr.structures:
-            sx = int((st.x / vw) * WORLD_W - self.cam_x)
-            sy = int(WATER_Y0 + max(0.0, min(1.0, st.y / vd)) * water_h)
+            wx_full = int((st.x / vw) * WORLD_W)
+            sx = wx_full - int(self.cam_x)
+            wy_full = int(WATER_Y0 + max(0.0, min(1.0, st.y / vd)) * water_h)
+            sy = wy_full
             if not (-20 <= sx <= MAIN_W + 20):
                 continue
             pygame.draw.circle(surface, (255, 60, 200), (sx, sy), 4)
             pygame.draw.circle(surface, (255, 255, 255), (sx, sy), 4, 1)
-            if self.font_sm is not None:
-                label = f"{self._STRUCT_DBG_LABEL.get(st.type, st.type)}·{st.tier}"
-                surface.blit(self.font_sm.render(label, True, (255, 200, 240)),
-                             (sx + 6, sy - 8))
+            if self.font_sm is None:
+                continue
+            rows = [f"{self._STRUCT_DBG_LABEL.get(st.type, st.type)}·{st.tier}"]
+            if st.type == "stake_cluster":
+                rows.append(self._stake_variant(st, wx_full, wy_full, reed_centers))
+            # この構造物由来の hotspot 種別を列挙 (source == st.type で近いもの)
+            col_c = int(st.x / vw * tr.grid_cols)
+            row_c = int(st.y / vd * tr.grid_rows)
+            kinds = []
+            for hs in getattr(tr, "hotspots", []) or []:
+                if hs.get("source") != st.type:
+                    continue
+                hc = hs["x"] / vw * tr.grid_cols
+                hr = hs["y"] / vd * tr.grid_rows
+                if ((hc - col_c) ** 2 + (hr - row_c) ** 2) ** 0.5 <= 6.0:
+                    kinds.append(hs["kind"])
+            rows.extend(kinds[:4])
+            for j, rtxt in enumerate(rows):
+                surface.blit(self.font_sm.render(rtxt, True, (255, 200, 240)),
+                             (sx + 6, sy - 8 + j * 15))
 
     def _spawn_fish(self, rng: random.Random) -> list:
         """スポーン: <40cm は群集管理 (ランダム)、≥40cm は個体管理。"""
@@ -2197,15 +2225,47 @@ class FishingView:
         else:
             self._draw_status_panel(surface)
 
-        # build id を右下に小さく常時表示 (Web配信の payload 鮮度切り分け用)。
-        # TODO(D-2.5 diag): 切り分け完了後は `and self.debug_mode` を復活させる。
-        if self.font_sm is not None:
-            txt = self.font_sm.render(f"BUILD: {BUILD_ID}", True, (255, 230, 120))
-            shadow = self.font_sm.render(f"BUILD: {BUILD_ID}", True, (0, 0, 0))
-            bx = SCREEN_W - txt.get_width() - 8
-            by = SCREEN_H - txt.get_height() - 6
-            surface.blit(shadow, (bx + 1, by + 1))
-            surface.blit(txt, (bx, by))
+        # TODO(D-2.5 diag): 切り分け完了後はこのブロックごと削除 or debug_mode に戻す。
+        self._draw_diag_overlay(surface)
+
+    def _draw_diag_overlay(self, surface: pygame.Surface) -> None:
+        """D-2.5 切り分け用: 最終surfaceへ常時直接描画するランタイム診断ブロック。
+
+        world pipeline を通さず debug_mode にも依存しない。
+        「最新payloadが動いているか / debug_modeがONか / 見ているspotに構造物が
+        あるか」を端末画面だけで判定できるようにする。
+        """
+        if self.font_sm is None:
+            return
+        tr = getattr(self, "terrain", None)
+        structs = list(getattr(tr, "structures", []) or [])
+        # 構造物の world 範囲 (bbox) を概算
+        if structs:
+            xs = [float(getattr(s, "x", 0.0)) for s in structs]
+            ys = [float(getattr(s, "y", 0.0)) for s in structs]
+            bbox = f"{min(xs):.0f},{min(ys):.0f}-{max(xs):.0f},{max(ys):.0f}m"
+        else:
+            bbox = "-"
+        layer = getattr(self, "_structure_layer", None)
+        lines = [
+            (f"BUILD: {BUILD_ID}", (255, 230, 120)),
+            (f"DBG: {'ON' if self.debug_mode else 'OFF'}",
+             (120, 255, 140) if self.debug_mode else (255, 140, 140)),
+            (f"SPOT: {self.spot_id} / {self.spot_name}", (200, 210, 255)),
+            (f"STRUCT: {'yes' if layer is not None else 'no'}  count={len(structs)}",
+             (200, 210, 255)),
+            (f"STRUCT bbox: {bbox}", (170, 180, 210)),
+        ]
+        # 右下に下から積む
+        pad = 6
+        y = SCREEN_H - pad
+        for txt, col in reversed(lines):
+            surf_t = self.font_sm.render(txt, True, col)
+            surf_s = self.font_sm.render(txt, True, (0, 0, 0))
+            y -= surf_t.get_height()
+            x = SCREEN_W - surf_t.get_width() - 8
+            surface.blit(surf_s, (x + 1, y + 1))
+            surface.blit(surf_t, (x, y))
 
     # ── Scene ──────────────────────────────────────────────────────────
 
