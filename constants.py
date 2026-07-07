@@ -1,3 +1,7 @@
+# Build/version id — DBG/F2 デバッグON時に画面へ表示し、Web(pygbag)配信時に
+# スマホが最新 payload を掴んでいるかを一発で切り分けるための識別子。
+BUILD_ID = "D2.5 e4f3620"
+
 SCREEN_W = 1280
 SCREEN_H = 720
 TILE_SIZE = 32

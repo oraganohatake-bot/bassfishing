@@ -10,6 +10,7 @@ from typing import Optional, Tuple
 import pygame
 
 from constants import (
+    BUILD_ID,
     SCREEN_W, SCREEN_H, UW_SIZE, UW_W, UW_H, FISHING_VIEW_WIDTH_SCALE,
     ZOOM_W, PIX_DIV, SIZE_BOOST,
     FS_IDLE, FS_CAST_CHARGE, FS_CASTING, FS_RETRIEVE, FS_BITE,
@@ -2195,6 +2196,15 @@ class FishingView:
             self._draw_fight_panel(surface)
         else:
             self._draw_status_panel(surface)
+
+        # DBG/F2 ON時のみ build id を右下に小さく表示 (Web配信の payload 鮮度切り分け用)
+        if self.debug_mode and self.font_sm is not None:
+            txt = self.font_sm.render(f"BUILD: {BUILD_ID}", True, (255, 230, 120))
+            shadow = self.font_sm.render(f"BUILD: {BUILD_ID}", True, (0, 0, 0))
+            bx = SCREEN_W - txt.get_width() - 8
+            by = SCREEN_H - txt.get_height() - 6
+            surface.blit(shadow, (bx + 1, by + 1))
+            surface.blit(txt, (bx, by))
 
     # ── Scene ──────────────────────────────────────────────────────────
 
