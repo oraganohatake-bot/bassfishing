@@ -2197,8 +2197,9 @@ class FishingView:
         else:
             self._draw_status_panel(surface)
 
-        # DBG/F2 ON時のみ build id を右下に小さく表示 (Web配信の payload 鮮度切り分け用)
-        if self.debug_mode and self.font_sm is not None:
+        # build id を右下に小さく常時表示 (Web配信の payload 鮮度切り分け用)。
+        # TODO(D-2.5 diag): 切り分け完了後は `and self.debug_mode` を復活させる。
+        if self.font_sm is not None:
             txt = self.font_sm.render(f"BUILD: {BUILD_ID}", True, (255, 230, 120))
             shadow = self.font_sm.render(f"BUILD: {BUILD_ID}", True, (0, 0, 0))
             bx = SCREEN_W - txt.get_width() - 8
