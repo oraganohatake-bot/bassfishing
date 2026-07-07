@@ -801,30 +801,206 @@ class FishingView:
                                    (top_x + rng.randint(-1, 1), top_y), max(1, w // 3))
 
     def _sl_laydown(self, surf, wx, wy, sc, st, rng, a):
+        """倒木: 太さ・根元(root ball)・枝・影を持つ水中カバーとして描く。
+
+        hotspot 対応: root_hole=根元の暗いえぐれ(中心), branch_tip=枝の張り出し先,
+        shade_line=幹下の影。幹は根元太→枝先細のテーパー、少し曲がりと節を持つ。
+        """
         ang = math.radians(st.rotation)
-        length = int(58 * sc)
-        tw = max(3, int(7 * sc))
-        self._sl_base_shadow(surf, wx, wy, 15 * sc, 12, a)
-        root = (wx, wy - int(4 * sc))
-        ex = int(wx + math.cos(ang) * length)
-        ey = int(root[1] - abs(math.sin(ang)) * length * 0.6 - 8 * sc)
-        pygame.draw.line(surf, (74, 52, 28, a), root, (ex, ey), tw)
-        # 枝を2本
-        for k in range(2):
-            t = 0.55 + 0.30 * k
-            bx = int(root[0] + (ex - root[0]) * t)
-            by = int(root[1] + (ey - root[1]) * t)
-            blen = int(20 * sc)
-            bang = ang + math.radians(rng.uniform(-55, -25) if k == 0
-                                      else rng.uniform(25, 55))
-            pygame.draw.line(surf, (74, 52, 28, a), (bx, by),
-                             (int(bx + math.cos(bang) * blen),
-                              int(by - abs(math.sin(bang)) * blen - 6 * sc)),
-                             max(2, tw - 2))
-        # 幹の根元側に水中青被り
-        pygame.draw.line(surf, (34, 64, 88, int(a * 0.45)), root,
-                         (int(root[0] + (ex - root[0]) * 0.4),
-                          int(root[1] + (ey - root[1]) * 0.4)), tw)
+        ca, sa = math.cos(ang), math.sin(ang)
+        length = 62 * sc
+        root_w = max(4, 9 * sc)                 # 根元の幹太さ
+        tip_w = max(2.0, 3.0 * sc)              # 枝先側の細さ
+        lift = 0.55                             # 奥行きによる y 方向の縮み
+        bend = rng.uniform(-0.16, 0.16)         # 幹全体のたわみ
+
+        # ── 幹の中心線 (少し曲がる) と各点の太さ ───────────────────
+        root = (wx, wy - int(3 * sc))
+        steps = 9
+        pts, widths = [], []
+        for i in range(steps + 1):
+            t = i / steps
+            along = length * t
+            off = math.sin(t * math.pi) * bend * length      # 法線方向のたわみ
+            px = root[0] + ca * along - sa * off
+            py = root[1] + sa * along * lift + ca * off * lift - 7 * sc * t
+            pts.append((px, py))
+            widths.append(root_w * (1.0 - 0.75 * t) + tip_w * 0.25)
+
+        # ── 幹下の影 (shade_line): 中心線を少し下にずらした暗帯 ─────
+        self._sl_base_shadow(surf, wx, wy, 18 * sc, 13, a)
+        for i in range(steps):
+            (x0, y0), (x1, y1) = pts[i], pts[i + 1]
+            sh_w = max(2, int(widths[i] * 1.1))
+            pygame.draw.line(surf, (6, 20, 34, int(a * 0.5)),
+                             (int(x0 + 2), int(y0 + widths[i] * 0.7 + 3)),
+                             (int(x1 + 2), int(y1 + widths[i + 1] * 0.7 + 3)), sh_w)
+
+        # ── 幹ポリゴン (テーパー): 法線オフセットで左右エッジを作る ──
+        left, right = [], []
+        for i in range(len(pts)):
+            if i < len(pts) - 1:
+                dx = pts[i + 1][0] - pts[i][0]; dy = pts[i + 1][1] - pts[i][1]
+            else:
+                dx = pts[i][0] - pts[i - 1][0]; dy = pts[i][1] - pts[i - 1][1]
+            dl = math.hypot(dx, dy) or 1.0
+            nx, ny = -dy / dl, dx / dl
+            hw = widths[i] * 0.5
+            left.append((pts[i][0] + nx * hw, pts[i][1] + ny * hw))
+            right.append((pts[i][0] - nx * hw, pts[i][1] - ny * hw))
+        trunk_poly = [(int(x), int(y)) for x, y in left + right[::-1]]
+        # 沈んだ暗い本体
+        pygame.draw.polygon(surf, (58, 42, 24, a), trunk_poly)
+        # 上面の陽当り (中心線をわずかに上へずらした少し明るいテーパー線)
+        for i in range(steps):
+            (x0, y0), (x1, y1) = pts[i], pts[i + 1]
+            up0 = widths[i] * 0.16; up1 = widths[i + 1] * 0.16
+            lw = max(1, int(widths[i] * 0.5))
+            pygame.draw.line(surf, (92, 66, 36, int(a * 0.85)),
+                             (int(x0), int(y0 - up0)), (int(x1), int(y1 - up1)), lw)
+        # 節 (幹の途中の暗い横筋を数本)
+        for i in (2, 4, 6):
+            nx0 = pts[i]
+            pygame.draw.circle(surf, (40, 28, 16, int(a * 0.8)),
+                               (int(nx0[0]), int(nx0[1])), max(1, int(widths[i] * 0.45)))
+
+        # ── 根元 / root ball (root_hole): 暗い塊 + 絡んだ根 + えぐれ影 ─
+        rbx, rby = int(root[0]), int(root[1])
+        rball = max(5, int(root_w * 1.5))
+        # 根元周囲の暗い楕円影 (terrain の root_hole えぐれに対応)
+        pygame.draw.ellipse(surf, (4, 16, 28, int(a * 0.6)),
+                            (rbx - rball, rby - rball // 2 + 2, rball * 2, rball))
+        rb_pts = []
+        rn = 7
+        for k in range(rn):
+            pa = 2 * math.pi * k / rn
+            rad = rball * rng.uniform(0.7, 1.15)
+            rb_pts.append((int(rbx + math.cos(pa) * rad),
+                           int(rby - math.sin(pa) * rad * 0.75)))
+        pygame.draw.polygon(surf, (46, 34, 20, a), rb_pts)
+        # 根が絡んだ短い枝線 (放射状)
+        for _r in range(rng.randint(4, 6)):
+            ra = rng.uniform(-math.pi, math.pi)
+            rl = rball * rng.uniform(0.8, 1.4)
+            pygame.draw.line(surf, (38, 27, 15, a), (rbx, rby),
+                             (int(rbx + math.cos(ra) * rl),
+                              int(rby - math.sin(ra) * rl * 0.7)),
+                             max(1, int(root_w * 0.28)))
+        # えぐれの黒い芯
+        pygame.draw.circle(surf, (2, 12, 22, int(a * 0.85)), (rbx, rby),
+                           max(2, int(rball * 0.4)))
+
+        # ── 枝 (branch_tip): 2〜5本を先端寄りから左右にばらけて出す ──
+        n_branch = max(2, min(5, int(2 + 3 * st.density)))
+        for k in range(n_branch):
+            t = rng.uniform(0.45, 0.95)
+            # 中心線上の分岐点
+            idx = min(steps, int(t * steps))
+            bx, by = pts[idx]
+            side = -1 if (k % 2 == 0) else 1
+            bang = ang + side * math.radians(rng.uniform(22, 62))
+            blen = length * rng.uniform(0.22, 0.42) * (0.6 + 0.4 * (1.0 - t))
+            bw = max(2, int((tip_w + (root_w - tip_w) * (1.0 - t)) * 0.7))
+            tx = int(bx + math.cos(bang) * blen)
+            ty = int(by + math.sin(bang) * blen * lift - 4 * sc)
+            pygame.draw.line(surf, (70, 50, 26, a), (int(bx), int(by)), (tx, ty), bw)
+            # 枝先の細り + 小影 + 藻っぽい緑
+            pygame.draw.line(surf, (54, 38, 20, int(a * 0.8)),
+                             (tx, ty), (int(tx + math.cos(bang) * blen * 0.3),
+                                        int(ty + math.sin(bang) * blen * 0.3 * lift)),
+                             max(1, bw - 1))
+            if rng.random() < 0.6:
+                pygame.draw.circle(surf, (58, 84, 46, int(a * 0.7)), (tx, ty),
+                                   max(1, int(2 * sc)))
+            pygame.draw.ellipse(surf, (6, 20, 32, int(a * 0.35)),
+                                (tx - int(3 * sc), ty + 1, int(6 * sc), int(3 * sc)))
+
+        # ── 根元側の水中青被り (沈んでいる感) ───────────────────────
+        submerged = [(int(pts[i][0]), int(pts[i][1])) for i in range(4)]
+        if len(submerged) >= 2:
+            pygame.draw.lines(surf, (34, 64, 88, int(a * 0.30)), False, submerged,
+                              max(2, int(root_w * 0.6)))
+
+    def _sl_rock_pile(self, surf, wx, wy, sc, st, rng, a):
+        """岩場: 小岩が積み重なった集合として描く。
+
+        hotspot 対応: rock_crevice=岩と岩の暗い隙間, hard_bottom_edge=岩場の外周
+        (砂/泥との硬い底の境目)。角張った polygon の大小混在、明暗と隙間で岩場感を出す。
+        """
+        rocks_n = max(4, min(8, int(4 + 4 * st.density)))
+        spread = int(26 * sc)
+
+        # ── 岩場の外周 = hard_bottom_edge (硬い底と砂泥の境目) ───────
+        self._sl_base_shadow(surf, wx, wy, spread * 1.35, 15, a)
+        ew, eh = int(spread * 1.25), int(spread * 0.8)
+        # 硬い底の縁: 暗い境目を主に、内側にごく薄いハイライト
+        pygame.draw.ellipse(surf, (22, 32, 38, int(a * 0.45)),
+                            (wx - ew, wy - eh // 2 + 5, ew * 2, eh),
+                            max(2, int(2.0 * sc)))
+        pygame.draw.ellipse(surf, (64, 74, 76, int(a * 0.16)),
+                            (wx - ew + 3, wy - eh // 2 + 7, ew * 2 - 6, eh - 4),
+                            max(1, int(1.2 * sc)))
+
+        # ── 岩の中心を配置 (大小混在) ──────────────────────────────
+        centers = []
+        for _i in range(rocks_n):
+            rx = wx + int(rng.uniform(-1, 1) * spread)
+            ry = wy + int(rng.uniform(-0.5, 0.9) * spread * 0.55)
+            big = rng.random() < 0.4
+            rr = (11 + rng.uniform(0, 6) if big else 6 + rng.uniform(0, 5)) * sc
+            centers.append([rx, ry, rr])
+
+        # ── crevice: 近接する岩ペアの間に暗い隙間を作る ─────────────
+        for i in range(len(centers)):
+            for j in range(i + 1, len(centers)):
+                ax, ay, ar = centers[i]; bx, by, br = centers[j]
+                d = math.hypot(ax - bx, ay - by)
+                if d < (ar + br) * 0.95:
+                    mx, my = (ax + bx) / 2, (ay + by) / 2
+                    pygame.draw.circle(surf, (8, 12, 16, int(a * 0.7)),
+                                       (int(mx), int(my)),
+                                       max(2, int(min(ar, br) * 0.55)))
+
+        # ── 岩本体: 奥(上) → 手前(下) の順。近いほど大きく暗め ────────
+        y_lo = wy - spread * 0.5
+        for rx, ry, rr in sorted(centers, key=lambda c: c[1]):
+            if rr < 3:
+                continue
+            near = max(0.0, min(1.0, (ry - y_lo) / max(1.0, spread)))
+            dk = int(18 * near)                     # 近いほど暗く
+            base = (92 - dk, 96 - dk, 104 - dk + 6)  # わずかに青み
+            # 角張った岩ポリゴン
+            n = rng.randint(6, 8)
+            a0 = rng.uniform(0, math.pi)
+            pts = []
+            for k in range(n):
+                pa = a0 + 2 * math.pi * k / n
+                rad = rr * rng.uniform(0.68, 1.15)
+                pts.append((int(rx + math.cos(pa) * rad),
+                            int(ry - math.sin(pa) * rad * 0.78)))
+            # 下側/奥側の影 (岩の足元)
+            pygame.draw.ellipse(surf, (26, 30, 40, int(a * 0.55)),
+                                (int(rx - rr), int(ry + rr * 0.15),
+                                 int(rr * 2), int(rr * 0.7)))
+            pygame.draw.polygon(surf, (*base, a), pts)
+            # 上面ハイライト (左上の面)
+            hl = [(int(rx - rr * 0.15), int(ry - rr * 0.6)),
+                  (int(rx + rr * 0.5), int(ry - rr * 0.35)),
+                  (int(rx - rr * 0.55), int(ry - rr * 0.1))]
+            pygame.draw.polygon(surf, (base[0] + 55, base[1] + 58, base[2] + 58,
+                                       int(a * 0.6)), hl)
+            # 下側の暗い面 (陰影)
+            pygame.draw.polygon(surf, (34, 38, 50, int(a * 0.5)), [
+                (int(rx - rr * 0.5), int(ry + rr * 0.05)),
+                (int(rx + rr * 0.5), int(ry + rr * 0.05)),
+                (int(rx), int(ry + rr * 0.55))])
+            # 岩の縁の暗い割れ目 (rock_crevice のニュアンス)
+            if rng.random() < 0.5:
+                cvx = int(rx + rng.uniform(-0.4, 0.4) * rr)
+                pygame.draw.line(surf, (12, 16, 22, int(a * 0.7)),
+                                 (cvx, int(ry - rr * 0.4)),
+                                 (cvx + int(rng.uniform(-3, 3) * sc), int(ry + rr * 0.3)),
+                                 max(1, int(1.4 * sc)))
 
     def _sl_weed_bed(self, surf, wx, wy, sc, st, rng, a, suppress=1.0):
         clumps = max(1, int(max(2, min(6, int(3 + 3 * st.density))) * suppress))
@@ -943,30 +1119,6 @@ class FishingView:
                 pygame.draw.line(surf, (100, 150, 96, int(a * 0.6)),
                                  (px, py), (px, py - ph // 2), 1)
             placed += 1
-
-    def _sl_rock_pile(self, surf, wx, wy, sc, st, rng, a):
-        rocks = max(3, min(6, int(3 + 3 * st.density)))
-        spread = int(24 * sc)
-        self._sl_base_shadow(surf, wx, wy, spread * 1.2, 12, a)
-        for _i in range(rocks):
-            rx = wx + rng.randint(-spread, spread)
-            ry = wy - rng.randint(0, int(10 * sc))
-            rr = int((8 + rng.randint(0, 7)) * sc)
-            if rr < 3:
-                continue
-            n = rng.randint(5, 7)
-            pts = []
-            for k in range(n):
-                pa = 2 * math.pi * k / n
-                rad = rr * rng.uniform(0.7, 1.15)
-                pts.append((int(rx + math.cos(pa) * rad),
-                            int(ry - math.sin(pa) * rad * 0.8)))
-            pygame.draw.polygon(surf, (96, 96, 104, a), pts)
-            # 上面ハイライト / 下面影
-            pygame.draw.ellipse(surf, (150, 155, 165, int(a * 0.55)),
-                                (rx - rr, ry - int(rr * 0.8), rr, int(rr * 0.5)))
-            pygame.draw.ellipse(surf, (40, 40, 50, int(a * 0.5)),
-                                (rx - rr // 2, ry + int(rr * 0.2), rr, int(rr * 0.4)))
 
     def _sl_stump_field(self, surf, wx, wy, sc, st, rng, a):
         count = max(2, min(6, int(2 + 4 * st.density)))
