@@ -738,12 +738,13 @@ class FishingView:
         """stake_cluster の由来タイプを文脈から決める。
 
         葦原が近ければ reed_fence (葦縁の古い杭列)、それ以外は old_pier_remnant。
+        近くに葦が無いスポット(岩場/桟橋跡)では決定的に old_pier_remnant にする。
         """
-        rng = random.Random((getattr(st, "seed", 0) or 0) ^ 0x5EED)
+        thr = 160.0 * max(0.6, getattr(st, "scale", 1.0))
         for rwx, rwy in reed_centers:
-            if math.hypot(wx - rwx, wy - rwy) < 130.0 * max(0.6, getattr(st, "scale", 1.0)):
+            if math.hypot(wx - rwx, wy - rwy) < thr:
                 return "reed_fence"
-        return "old_pier_remnant" if rng.random() < 0.7 else "reed_fence"
+        return "old_pier_remnant"
 
     @staticmethod
     def _sl_base_shadow(surf, wx, wy, rw, rh, a):
@@ -1027,7 +1028,8 @@ class FishingView:
             pygame.draw.circle(surface, (255, 255, 255), (sx, sy), 4, 1)
             if self.font_sm is None:
                 continue
-            rows = [f"{self._STRUCT_DBG_LABEL.get(st.type, st.type)}·{st.tier}"]
+            rows = [f"{self._STRUCT_DBG_LABEL.get(st.type, st.type)}·{st.tier}"
+                    f" x={st.x:.1f} y={st.y:.1f}"]
             if st.type == "stake_cluster":
                 rows.append(self._stake_variant(st, wx_full, wy_full, reed_centers))
             # この構造物由来の hotspot 種別を列挙 (source == st.type で近いもの)

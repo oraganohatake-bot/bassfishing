@@ -65,12 +65,14 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         grid_cols=32, grid_rows=24,
         base_depth_m=0.8, max_depth_m=3.8,
         depth_profile="steep_break",
+        # D-2.6: 岩場 + 旧桟橋跡のポイント。岩を主役に、杭列は離した位置で
+        # 岸→沖の桟橋跡 (old_pier_remnant; 近くに葦が無いので決定的) に見せる。
         structures=[
-            StructureObject(type="rock_pile", x=20.0, y=9.0,
-                            scale=1.1, rotation=0.0, density=0.8,
+            StructureObject(type="rock_pile", x=21.0, y=8.0,
+                            scale=1.15, rotation=0.0, density=0.8,
                             seed=1011, tier="HERO"),
-            StructureObject(type="stake_cluster", x=8.0, y=16.0,
-                            scale=1.0, rotation=0.0, density=0.7,
+            StructureObject(type="stake_cluster", x=8.0, y=15.0,
+                            scale=1.0, rotation=0.0, density=0.75,
                             seed=1012, tier="MID"),
         ],
     ),
@@ -81,16 +83,25 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         grid_cols=32, grid_rows=24,
         base_depth_m=0.4, max_depth_m=1.2,
         depth_profile="shallow_flat",
+        # D-2.6: 役割分担した構図。奥左に葦原、その縁に古い杭列(reed_fence)、
+        # 手前右にリリーパッド、中央手前に下地のウィード。中心をベタ重ねしない。
         structures=[
-            StructureObject(type="weed_bed", x=12.0, y=10.0,
-                            scale=1.2, rotation=0.0, density=0.9,
-                            seed=2011, tier="HERO"),
+            # 奥・左岸際の葦原 (横に長め・高密度)
             StructureObject(type="reed_bed", x=6.0, y=5.0,
-                            scale=1.0, rotation=0.0, density=0.9,
+                            scale=1.25, rotation=8.0, density=0.9,
                             seed=2012, tier="MID"),
-            StructureObject(type="lily_pads", x=23.0, y=7.0,
-                            scale=1.0, rotation=15.0, density=0.8,
+            # 葦原の外側エッジ沿いの古い杭列 → _stake_variant が reed_fence 判定
+            StructureObject(type="stake_cluster", x=8.5, y=6.5,
+                            scale=0.9, rotation=0.0, density=0.6,
+                            seed=2014, tier="LOW"),
+            # 手前右のリリーパッド (葦・ウィードから離す)
+            StructureObject(type="lily_pads", x=13.0, y=8.5,
+                            scale=1.1, rotation=15.0, density=0.75,
                             seed=2013, tier="MID"),
+            # 中央手前の下地ウィード (広め・薄め; reed/lily の真下に重ねない)
+            StructureObject(type="weed_bed", x=11.0, y=11.0,
+                            scale=1.4, rotation=0.0, density=0.6,
+                            seed=2011, tier="HERO"),
         ],
     ),
     "spot_03": FishingSpot(
@@ -175,14 +186,16 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         grid_cols=32, grid_rows=24,
         base_depth_m=1.5, max_depth_m=3.5,
         depth_profile="steep_break",
+        # D-2.6: 岩場 + 杭跡の複合。岩2つは中心をずらし、杭列は岩の真上でなく
+        # 手前脇へ (old_pier_remnant として絡ませる)。中央に集めすぎない。
         structures=[
-            StructureObject(type="rock_pile", x=15.0, y=10.0,
+            StructureObject(type="rock_pile", x=13.0, y=9.0,
                             scale=1.3, rotation=0.0, density=0.9,
                             seed=1001, tier="HERO"),
-            StructureObject(type="rock_pile", x=24.0, y=14.0,
+            StructureObject(type="rock_pile", x=25.0, y=14.0,
                             scale=0.9, rotation=0.0, density=0.7,
                             seed=1002, tier="MID"),
-            StructureObject(type="stake_cluster", x=6.0, y=17.0,
+            StructureObject(type="stake_cluster", x=7.0, y=18.0,
                             scale=1.0, rotation=0.0, density=0.7,
                             seed=1003, tier="LOW"),
         ],
