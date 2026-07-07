@@ -323,10 +323,14 @@ _STRUCT_INFLUENCE: dict = {
             "snag": 0.45, "ambush": 0.60, "depth_delta_m": +0.25,  # 葦の切れ目ポケット→深い
             "bottom_type": "mud",
         },
+        # D-2.5: ホットスポットは中心(core)ではなく「際/切れ目/ポケット/先端」を優先。
+        # core は cover/shade が強いが hotspot は中程度。edge/gap/pocket が高い。
         "hotspots": [
-            ("reed_gap",     0.0,  0.0, 0.75, ["worm", "jig"],         "snag_med"),
-            ("reed_pocket",  1.5,  1.0, 0.70, ["worm"],                "snag_med"),
-            ("outside_edge", 0.0, -2.5, 0.65, ["spinnerbait", "crankbait"], "snag_low"),
+            ("reed_core",    0.0,  0.0, 0.45, ["worm", "jig"],               "snag_high"),
+            ("reed_gap",     1.4,  0.6, 0.80, ["worm", "jig"],               "snag_med"),
+            ("reed_pocket", -1.8,  1.3, 0.85, ["worm"],                      "snag_med"),
+            ("tip_edge",     3.0, -0.8, 0.78, ["spinnerbait", "crankbait"],  "snag_low"),
+            ("outside_edge", 0.0, -3.0, 0.72, ["spinnerbait", "crankbait"],  "snag_low"),
         ],
     },
     "lily_pads": {
@@ -336,9 +340,13 @@ _STRUCT_INFLUENCE: dict = {
             "snag": 0.65, "ambush": 0.70, "depth_delta_m": +0.25,  # パッドの穴→深い
             "bottom_type": "mud",
         },
+        # D-2.5: 中心(core)より「外周/穴/通せる筋」を優先。
+        # core は shade/cover 強・hotspot 中程度。hole/edge/lane が高い。
         "hotspots": [
-            ("pad_hole", 0.0, 0.0, 0.80, ["worm", "jig"],        "snag_high"),
-            ("pad_edge", 2.5, 0.0, 0.70, ["topwater", "spinnerbait"], "snag_med"),
+            ("pad_core",  0.0,  0.0, 0.45, ["worm", "jig"],             "snag_high"),
+            ("pad_hole",  1.2, -0.8, 0.82, ["worm", "jig"],             "snag_high"),
+            ("pad_edge",  2.8,  0.6, 0.75, ["topwater", "spinnerbait"], "snag_med"),
+            ("pad_lane", -2.6,  1.0, 0.78, ["topwater", "worm"],        "snag_med"),
         ],
     },
     "rock_pile": {
