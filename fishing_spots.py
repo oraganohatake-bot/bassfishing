@@ -117,11 +117,11 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         structures=[
             # 主役: 奥・右岸際の葦原
             StructureObject(type="reed_bed", x=20.0, y=6.0,
-                            scale=1.2, rotation=-8.0, density=0.85,
+                            scale=1.35, rotation=-8.0, density=0.9,
                             seed=3011, tier="MID"),
-            # 補助: 手前側の下地ウィード (薄め・葦の真下に重ねない)
+            # 補助: 手前側の下地ウィード (D-3.3: 量感UPで岸際感を出す)
             StructureObject(type="weed_bed", x=13.0, y=16.0,
-                            scale=1.2, rotation=0.0, density=0.5,
+                            scale=1.45, rotation=0.0, density=0.75,
                             seed=3012, tier="LOW"),
         ],
     ),
@@ -239,9 +239,9 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
             StructureObject(type="rock_pile", x=16.0, y=8.0,
                             scale=1.1, rotation=0.0, density=0.8,
                             seed=9011, tier="HERO"),
-            # 補助: 岩の外側に薄く広がるウィード (エッジ用)
-            StructureObject(type="weed_bed", x=21.0, y=13.0,
-                            scale=1.2, rotation=0.0, density=0.5,
+            # 補助: 岩の外側に広がるウィードエッジ (D-3.3: 量感UP・少し内側へ)
+            StructureObject(type="weed_bed", x=19.5, y=13.0,
+                            scale=1.45, rotation=0.0, density=0.7,
                             seed=9012, tier="LOW"),
         ],
     ),

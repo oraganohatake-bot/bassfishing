@@ -652,6 +652,14 @@ class FishingView:
         "weed_bed": 1,
     }
 
+    # D-3.3: 植生 suppression の下限 (alpha_mult, count_mult, min_alpha)。
+    #   強構造物の近くでも下地植生が完全に消えないようにする。
+    _VEG_SUPP_FLOOR = {
+        "weed_bed":  (0.45, 0.45, 90),
+        "reed_bed":  (0.60, 0.60, 100),
+        "lily_pads": (0.60, 0.60, 100),
+    }
+
     def _get_or_build_structure_layer(self) -> pygame.Surface:
         """spot_id ごとに structure_layer をキャッシュして返す。"""
         cached = _STRUCTURE_LAYER_CACHE.get(self.spot_id)
@@ -710,8 +718,13 @@ class FishingView:
             # 上位ストラクチャーの近くでは下位を薄く/間引く
             supp_a, supp_c = self._structure_suppression(st, wx, wy, placed)
             if stype in ("weed_bed", "reed_bed", "lily_pads"):
-                drawer(surf, wx, wy, sc, st, rng,
-                       int(alpha * supp_a), suppress=supp_c)
+                # D-3.3: suppression で完全消滅しないよう下限を設ける。
+                #   旧グリッドレイヤーが担っていた量感を新レイヤーで復活させる。
+                a_floor, c_floor, min_a = self._VEG_SUPP_FLOOR[stype]
+                sa = max(supp_a, a_floor)
+                sc_supp = max(supp_c, c_floor)
+                veg_alpha = max(int(alpha * sa), min_a)
+                drawer(surf, wx, wy, sc, st, rng, veg_alpha, suppress=sc_supp)
             elif stype == "stake_cluster":
                 variant = self._stake_variant(st, wx, wy, reed_centers)
                 drawer(surf, wx, wy, sc, st, rng, alpha, variant=variant)
@@ -1066,33 +1079,36 @@ class FishingView:
                                  max(1, int(1.4 * sc)))
 
     def _sl_weed_bed(self, surf, wx, wy, sc, st, rng, a, suppress=1.0):
-        # D-3.1: 単一の均一パッチではなく 2〜4個の小クラスターの集合にする。
-        # クラスタごとに濃淡を変え、個別に y をずらして横一直線(行)感を壊す。
-        spread = int(30 * sc)
-        n_cl = max(2, int(rng.randint(2, 4) * (0.6 + 0.4 * suppress)))
+        # D-3.3: 旧グリッド層OFF後の量感を復活。広めに散る 3〜6個の小クラスター
+        # の集合にし、各クラスタの本数/alphaを上げる。ただし均等配置には戻さず、
+        # 中心密・外周疎・ところどころ抜けを維持する。
+        spread = int(42 * sc)
+        n_cl = max(3, int((3 + 3 * st.density) * (0.6 + 0.4 * suppress)))
         clus_ang = rng.uniform(-0.4, 0.4)                   # 群れ全体の傾き
         cca, csa = math.cos(clus_ang), math.sin(clus_ang)
         # 下地の薄い暗色帯 (端はにじんで終わる)
-        pygame.draw.ellipse(surf, (10, 40, 26, int(min(80, a) * 0.9)),
-                            (wx - spread, wy - 5, spread * 2, 12))
-        w = max(1, int(1.5 * sc))
+        pygame.draw.ellipse(surf, (12, 44, 28, int(min(95, a) * 0.9)),
+                            (wx - spread, wy - 6, spread * 2, 14))
+        w = max(1, int(1.6 * sc))
         for _cl in range(n_cl):
-            # サブクラスタ中心: 傾き楕円上・中心寄せ
-            rad = rng.random() ** 0.6
+            if rng.random() < 0.12:                         # 意図的な抜け
+                continue
+            # サブクラスタ中心: 傾き楕円上・中心寄せ (rad**0.85 でやや広がる)
+            rad = rng.random() ** 0.85
             cang = rng.uniform(0, 2 * math.pi)
             ex = math.cos(cang) * rad
             ey = math.sin(cang) * rad * 0.5
             ccx = wx + int((ex * cca - ey * csa) * spread)
             ccy = wy + int((ex * csa + ey * cca) * spread * 0.6)
-            dens = rng.uniform(0.5, 1.0)                    # クラスタごとの濃淡
-            blades = max(3, int(rng.randint(4, 8) * dens))
-            cw = int(rng.uniform(6, 12) * sc)
-            aa = int(a * (0.6 + 0.4 * dens))
+            dens = rng.uniform(0.55, 1.0)                   # クラスタごとの濃淡
+            blades = max(4, int(rng.randint(5, 9) * dens))
+            cw = int(rng.uniform(7, 13) * sc)
+            aa = int(a * (0.72 + 0.28 * dens))
             for _b in range(blades):
                 t = rng.uniform(-1, 1); t = t * abs(t)      # 房内も中心密
                 gx = ccx + int(t * cw)
                 gy = ccy + rng.randint(-3, 3)               # 個別y (行感を壊す)
-                gh = int((9 + rng.randint(0, 9)) * sc)
+                gh = int((10 + rng.randint(0, 10)) * sc)
                 r = rng.random()
                 col = (40, 104, 50) if r < 0.4 else (
                        (56, 128, 62) if r < 0.75 else (80, 150, 74))
@@ -1100,17 +1116,17 @@ class FishingView:
                                  (gx, gy), (gx + rng.randint(-3, 3), gy - gh), w)
 
     def _sl_reed_bed(self, surf, wx, wy, sc, st, rng, a, suppress=1.0):
-        # D-2.5: 「まとまった葦原」に見せる。房(clump)を楕円パッチ内に配置し、
-        # 中心は密く高く、外周は疎く薄く、明確なポケット(切れ目)を 1〜2箇所あける。
+        # D-3.3: 岸際の葦群生として量感を強める。房を増やし、茎を太く/濃くし、
+        # 房ごとに水際の暗い根元帯を足す。中心密・外周疎・ポケットは維持。
         spread = int(44 * sc)
-        n_clumps = max(3, min(6, int((3 + 3 * st.density) * (0.6 + 0.4 * suppress))))
+        n_clumps = max(4, min(7, int((4 + 3 * st.density) * (0.6 + 0.4 * suppress))))
         # 群生全体の下地 (薄い暗色帯)
-        pygame.draw.ellipse(surf, (18, 46, 30, int(min(90, a) * 0.9)),
-                            (wx - spread, wy - 3, spread * 2, 11))
+        pygame.draw.ellipse(surf, (18, 48, 30, int(min(105, a) * 0.9)),
+                            (wx - spread, wy - 3, spread * 2, 13))
         # ポケット(切れ目): 群生内の空きゾーンを 1〜2個。房中心がここに来たら間引く。
         pockets = [(rng.uniform(-0.7, 0.7), rng.uniform(-0.5, 0.5))
                    for _ in range(rng.randint(1, 2))]
-        w = max(1, int(1.7 * sc))
+        w = max(2, int(2.0 * sc))
         for _c in range(n_clumps):
             rad = rng.random() ** 0.5                 # 中心寄せ (外周は疎)
             cang = rng.uniform(0, 2 * math.pi)
@@ -1119,12 +1135,15 @@ class FishingView:
                 continue                              # 切れ目を作る
             cx = wx + int(fx * spread)
             base_wy = wy + int(fy * spread * 0.35)    # 奥行き方向に少しずらす
-            edge_fade = 1.0 - 0.45 * rad              # 外周は本数/濃度を落とす
-            cw = int(rng.uniform(6, 12) * sc)
-            base_h = rng.uniform(22, 42) * sc * (0.7 + 0.3 * (1.0 - rad))  # 中心=高い
+            edge_fade = 1.0 - 0.4 * rad               # 外周は本数/濃度を落とす
+            cw = int(rng.uniform(7, 13) * sc)
+            base_h = rng.uniform(24, 46) * sc * (0.7 + 0.3 * (1.0 - rad))  # 中心=高い
             lean = rng.uniform(-0.18, 0.18)           # 房ごとの傾き癖
-            blades = max(2, int(rng.uniform(4, 8) * (0.6 + 0.6 * st.density) * edge_fade))
-            ca = int(a * (0.7 + 0.3 * (1.0 - rad)))   # 外周は薄い alpha
+            blades = max(3, int(rng.uniform(5, 9) * (0.6 + 0.6 * st.density) * edge_fade))
+            ca = int(a * (0.78 + 0.22 * (1.0 - rad)))  # 外周は薄い alpha
+            # 房の水際の暗い根元帯 (葦が生える岸際の陰)
+            pygame.draw.ellipse(surf, (14, 40, 26, int(ca * 0.7)),
+                                (cx - cw, base_wy - 2, cw * 2, max(3, int(4 * sc))))
             for _b in range(blades):
                 t = rng.uniform(-1, 1)
                 t = t * abs(t)                        # 房内も中心密・外側疎
@@ -1147,12 +1166,12 @@ class FishingView:
                                      max(1, w - 1))
 
     def _sl_lily_pads(self, surf, wx, wy, sc, st, rng, a, suppress=1.0):
-        # D-2.5: 葉の大小 + V字欠け + 群れ方(中心密/外周疎ギザ) + pad hole
-        #        + ルアーを通せる lane(筋) を1本あける。
+        # D-3.3: 水面カバーとしての量感を強める。葉数を増やし少し大きくする。
+        #        pad_hole / pad_lane / 大小・欠け・外周散りは維持。
         spread = int(38 * sc)
-        pads = max(4, int(max(5, min(12, int(6 + 6 * st.density))) * suppress))
+        pads = max(6, int(max(7, min(14, int(8 + 6 * st.density))) * suppress))
         # 群生全体の薄い暗色 (水面シェード感)
-        pygame.draw.ellipse(surf, (6, 26, 34, int(a * 0.28)),
+        pygame.draw.ellipse(surf, (6, 26, 34, int(a * 0.32)),
                             (wx - spread, wy - int(spread * 0.4) + 3,
                              spread * 2, int(spread * 0.9)))
         # pad hole 中心 (葉のない穴 1〜2個)
@@ -1176,7 +1195,7 @@ class FishingView:
             px = wx + int(fx * spread) + rng.randint(-2, 2)   # 外周ギザつき
             py = wy + int(fy * spread * 0.7)
             r = rng.random()                            # 大小 3クラス
-            base = 4 if r < 0.30 else (7 if r < 0.75 else 10)
+            base = 5 if r < 0.30 else (8 if r < 0.75 else 11)
             pr = int(base * sc * rng.uniform(0.85, 1.15))
             if pr < 2:
                 continue
