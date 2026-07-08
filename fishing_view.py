@@ -753,52 +753,71 @@ class FishingView:
         pygame.draw.ellipse(surf, (8, 24, 42, min(120, a)),
                             (wx - rw, wy - rh // 2, rw * 2, rh))
 
+    def _draw_one_stake(self, surf, px, base_wy, sc, rng, a, broken_p):
+        """1本の杭を描く (幹・影・水際の黒ずみ・天面/折れ)。"""
+        h = int(rng.uniform(16, 42) * sc)                    # 高さ差(大)
+        w = max(2, int(rng.uniform(2.6, 4.2) * sc))          # 太さ差
+        tilt = int(rng.uniform(-0.16, 0.16) * h)             # 傾き(混在方向)
+        top_x, top_y = px + tilt, base_wy - h
+        # 杭ごとの小さな根元影
+        pygame.draw.ellipse(surf, (8, 24, 42, int(a * 0.5)),
+                            (px - w, base_wy - 2, w * 2, 6))
+        # 幹本体 (茶〜灰茶)
+        pygame.draw.line(surf, (94, 68, 38, a), (px, base_wy), (top_x, top_y), w)
+        # 影側 (暗い茶) を片側に薄く
+        off = max(1, w // 3)
+        pygame.draw.line(surf, (60, 42, 22, int(a * 0.55)),
+                         (px + off, base_wy), (top_x + off, top_y), max(1, w // 2))
+        # 水際の黒ずみ (根元付近の変色帯)
+        band_h = int(h * rng.uniform(0.18, 0.32))
+        bx = px + int(tilt * (band_h / max(1, h)))
+        pygame.draw.line(surf, (34, 26, 20, int(a * 0.8)),
+                         (px, base_wy), (bx, base_wy - band_h), w)
+        # 天面 (切断面ハイライト / たまに折れ・欠け)
+        broken = rng.random() < broken_p
+        cap = (110, 84, 50, a) if broken else (150, 118, 70, a)
+        pygame.draw.circle(surf, cap, (top_x, top_y),
+                           max(1, w // 2 + (0 if broken else 1)))
+        if broken:
+            pygame.draw.circle(surf, (70, 52, 30, a),
+                               (top_x + rng.randint(-1, 1), top_y), max(1, w // 3))
+
     def _sl_stake_cluster(self, surf, wx, wy, sc, st, rng, a, variant="old_pier_remnant"):
-        # D-2.5: 由来タイプで見た目を変える。
-        #   old_pier_remnant … 桟橋跡。やや整列/直線・高さ差・折れ杭が多い。
-        #   reed_fence        … 葦縁の杭列。弧状ライン・不規則・折れは少なめ。
+        # D-3.1: 由来タイプで「意味のある並び」にする。
+        #   old_pier_remnant … 桟橋跡。沖へ向かう斜めライン + たまに2列(桟橋の足)。
+        #                       高さ差・折れ杭が多く「朽ちた桟橋」に見せる。
+        #   reed_fence        … 葦縁の杭列。弧状/折れ線で葦の縁に沿う。不規則・折れ少。
         reed_fence = (variant == "reed_fence")
         count = max(3, min(7, int(3 + 4 * st.density)))
         spread = int(count * 4 * sc)
         # cluster全体のうっすら影
         self._sl_base_shadow(surf, wx, wy, spread * 0.8, 9, a)
-        # reed_fence: 弧状ラインで葦縁に沿う / old_pier: 直線
-        arc = rng.uniform(0.18, 0.42) if reed_fence else 0.0
-        arc_sign = rng.choice((-1, 1))
-        broken_p = 0.10 if reed_fence else 0.30
-        for i in range(count):
-            base_t = (i - (count - 1) / 2) / max(1, count - 1)   # -0.5..0.5
-            jitter = rng.randint(-4, 4) if reed_fence else rng.randint(-1, 1)
-            px = wx + int(base_t * spread * 2) + jitter
-            # 弧: 中央がせり出す (reed_fence のみ)
-            y_arc = int(arc_sign * arc * spread * (1.0 - (2 * base_t) ** 2))
-            base_wy = wy + y_arc
-            h = int(rng.uniform(16, 42) * sc)                    # 高さ差(大)
-            w = max(2, int(rng.uniform(2.6, 4.2) * sc))          # 太さ差
-            tilt = int(rng.uniform(-0.16, 0.16) * h)             # 傾き(混在方向)
-            top_x, top_y = px + tilt, base_wy - h
-            # 杭ごとの小さな根元影
-            pygame.draw.ellipse(surf, (8, 24, 42, int(a * 0.5)),
-                                (px - w, base_wy - 2, w * 2, 6))
-            # 幹本体 (茶〜灰茶)
-            pygame.draw.line(surf, (94, 68, 38, a), (px, base_wy), (top_x, top_y), w)
-            # 影側 (暗い茶) を片側に薄く
-            off = max(1, w // 3)
-            pygame.draw.line(surf, (60, 42, 22, int(a * 0.55)),
-                             (px + off, base_wy), (top_x + off, top_y), max(1, w // 2))
-            # 水際の黒ずみ (根元付近の変色帯)
-            band_h = int(h * rng.uniform(0.18, 0.32))
-            bx = px + int(tilt * (band_h / max(1, h)))
-            pygame.draw.line(surf, (34, 26, 20, int(a * 0.8)),
-                             (px, base_wy), (bx, base_wy - band_h), w)
-            # 天面 (切断面ハイライト / たまに折れ・欠け)
-            broken = rng.random() < broken_p
-            cap = (110, 84, 50, a) if broken else (150, 118, 70, a)
-            pygame.draw.circle(surf, cap, (top_x, top_y),
-                               max(1, w // 2 + (0 if broken else 1)))
-            if broken:
-                pygame.draw.circle(surf, (70, 52, 30, a),
-                                   (top_x + rng.randint(-1, 1), top_y), max(1, w // 3))
+        broken_p = 0.10 if reed_fence else 0.32
+
+        if reed_fence:
+            # 葦縁に沿う弧状ライン (中央がせり出す)
+            arc = rng.uniform(0.20, 0.44)
+            arc_sign = rng.choice((-1, 1))
+            for i in range(count):
+                base_t = (i - (count - 1) / 2) / max(1, count - 1)   # -0.5..0.5
+                px = wx + int(base_t * spread * 2) + rng.randint(-4, 4)
+                y_arc = int(arc_sign * arc * spread * (1.0 - (2 * base_t) ** 2))
+                self._draw_one_stake(surf, px, wy + y_arc, sc, rng, a, broken_p)
+        else:
+            # 桟橋跡: 沖(奥/上)へ向かう斜めの主ライン。たまに2列にして「足場」に。
+            slope = rng.uniform(0.22, 0.5) * rng.choice((-1, 1))     # 斜め方向
+            two_rows = rng.random() < 0.45
+            row_dx = int(spread * 0.5)                               # 2列目の横ずれ
+            row_dy = int(6 * sc)                                     # 2列目の奥ずれ
+            for i in range(count):
+                base_t = (i - (count - 1) / 2) / max(1, count - 1)   # -0.5..0.5
+                px = wx + int(base_t * spread * 2) + rng.randint(-2, 2)
+                py = wy + int(base_t * spread * slope)               # 斜めライン
+                self._draw_one_stake(surf, px, py, sc, rng, a, broken_p)
+                # 2列目 (桟橋の反対側の足): 本数は間引く
+                if two_rows and rng.random() < 0.7:
+                    self._draw_one_stake(surf, px + row_dx + rng.randint(-2, 2),
+                                         py + row_dy, sc, rng, a, broken_p)
 
     def _sl_laydown(self, surf, wx, wy, sc, st, rng, a):
         """倒木: 太さ・根元(root ball)・枝・影を持つ水中カバーとして描く。
@@ -922,33 +941,69 @@ class FishingView:
                               max(2, int(root_w * 0.6)))
 
     def _sl_rock_pile(self, surf, wx, wy, sc, st, rng, a):
-        """岩場: 小岩が積み重なった集合として描く。
+        """岩場: 主塊(core) + 周辺の散り石(side) + 暗い隙間(crevice) の3層で描く。
 
+        D-3.1: 箱状の均等ばら撒きをやめ、傾いた楕円分布 + 片寄り + 抜け(gap) で
+        「寄っている所は寄っている、ない所はない」自然な岩場にする。
         hotspot 対応: rock_crevice=岩と岩の暗い隙間, hard_bottom_edge=岩場の外周
-        (砂/泥との硬い底の境目)。角張った polygon の大小混在、明暗と隙間で岩場感を出す。
+        (主塊外周の一部として視認)。角張った polygon の大小混在で岩場感を出す。
         """
-        rocks_n = max(4, min(8, int(4 + 4 * st.density)))
         spread = int(26 * sc)
 
-        # ── 岩場の外周 = hard_bottom_edge (硬い底と砂泥の境目) ───────
-        self._sl_base_shadow(surf, wx, wy, spread * 1.35, 15, a)
-        ew, eh = int(spread * 1.25), int(spread * 0.8)
-        # 硬い底の縁: 暗い境目を主に、内側にごく薄いハイライト
-        pygame.draw.ellipse(surf, (22, 32, 38, int(a * 0.45)),
-                            (wx - ew, wy - eh // 2 + 5, ew * 2, eh),
-                            max(2, int(2.0 * sc)))
-        pygame.draw.ellipse(surf, (64, 74, 76, int(a * 0.16)),
-                            (wx - ew + 3, wy - eh // 2 + 7, ew * 2 - 6, eh - 4),
-                            max(1, int(1.2 * sc)))
+        # ── 岩場全体の向き / 偏り (行・列感を壊す) ────────────────────
+        clus_ang = rng.uniform(-0.55, 0.55)                 # 傾いた楕円
+        cca, csa = math.cos(clus_ang), math.sin(clus_ang)
+        ax_r = 1.0
+        ay_r = rng.uniform(0.42, 0.62)                      # 縦横比
+        bias_ang = rng.uniform(0, 2 * math.pi)              # 散りの片寄り方向
+        bias_x = math.cos(bias_ang) * spread * 0.30
+        bias_y = math.sin(bias_ang) * spread * 0.16
+        gap0 = rng.uniform(0, 2 * math.pi)                  # 抜けセクター
+        gap_w = rng.uniform(0.7, 1.25)
 
-        # ── 岩の中心を配置 (大小混在) ──────────────────────────────
+        def _in_gap(theta):
+            return ((theta - gap0) % (2 * math.pi)) < gap_w
+
+        def _place(rad_n, theta):
+            ex = math.cos(theta) * rad_n * ax_r
+            ey = math.sin(theta) * rad_n * ay_r
+            dx = (ex * cca - ey * csa) * spread
+            dy = (ex * csa + ey * cca) * spread
+            return (wx + dx + bias_x * rad_n, wy + dy + bias_y * rad_n)
+
+        # ── hard_bottom_edge: 主塊外周の一部 (弧・欠けあり) ──────────
+        self._sl_base_shadow(surf, wx, wy, spread * 1.3, 15, a)
+        ew, eh = int(spread * 1.2), int(spread * 0.78)
+        edge_rect = (wx - ew, wy - eh // 2 + 5, ew * 2, eh)
+        e0 = rng.uniform(0, math.pi)                        # 縁は一部だけ描く
+        pygame.draw.arc(surf, (22, 32, 38, int(a * 0.5)), edge_rect,
+                        e0, e0 + rng.uniform(2.6, 4.2), max(2, int(2.2 * sc)))
+        pygame.draw.arc(surf, (64, 74, 76, int(a * 0.18)),
+                        (edge_rect[0] + 3, edge_rect[1] + 2,
+                         edge_rect[2] - 6, edge_rect[3] - 4),
+                        e0 + 0.2, e0 + rng.uniform(2.2, 3.6), max(1, int(1.2 * sc)))
+
+        # ── 1) core stones: 主塊 (2〜4個, やや大, 互いに接する/重なる) ─
         centers = []
-        for _i in range(rocks_n):
-            rx = wx + int(rng.uniform(-1, 1) * spread)
-            ry = wy + int(rng.uniform(-0.5, 0.9) * spread * 0.55)
-            big = rng.random() < 0.4
-            rr = (11 + rng.uniform(0, 6) if big else 6 + rng.uniform(0, 5)) * sc
-            centers.append([rx, ry, rr])
+        n_core = rng.randint(2, 4)
+        core_r = spread * 0.22                              # 主塊は狭い範囲に密集
+        for _i in range(n_core):
+            ang = rng.uniform(0, 2 * math.pi)
+            cx = wx + int(math.cos(ang) * core_r * rng.uniform(0.0, 1.0))
+            cy = wy + int(math.sin(ang) * core_r * 0.6 * rng.uniform(0.0, 1.0))
+            rr = (11 + rng.uniform(0, 7)) * sc
+            centers.append([cx, cy, rr])
+
+        # ── 2) side stones: 周辺の小岩 (中心密・外周疎, 抜けあり, 片寄り) ─
+        n_side = max(3, min(7, int(3 + 4 * st.density)))
+        for _i in range(n_side):
+            theta = rng.uniform(0, 2 * math.pi)
+            if _in_gap(theta):                             # 抜け側は置かない
+                continue
+            rad_n = 0.4 + 0.6 * (rng.random() ** 0.7)      # 外周ほど疎
+            sx, sy = _place(rad_n, theta)
+            rr = (5 + rng.uniform(0, 5)) * sc
+            centers.append([int(sx), int(sy), rr])
 
         # ── crevice: 近接する岩ペアの間に暗い隙間を作る ─────────────
         for i in range(len(centers)):
@@ -1003,18 +1058,38 @@ class FishingView:
                                  max(1, int(1.4 * sc)))
 
     def _sl_weed_bed(self, surf, wx, wy, sc, st, rng, a, suppress=1.0):
-        clumps = max(1, int(max(2, min(6, int(3 + 3 * st.density))) * suppress))
+        # D-3.1: 単一の均一パッチではなく 2〜4個の小クラスターの集合にする。
+        # クラスタごとに濃淡を変え、個別に y をずらして横一直線(行)感を壊す。
         spread = int(30 * sc)
-        pygame.draw.ellipse(surf, (10, 40, 26, min(90, a)),
-                            (wx - spread, wy - 4, spread * 2, 10))
-        for _c in range(clumps):
-            cxo = rng.randint(-spread, spread)
-            for _b in range(rng.randint(3, 6)):
-                gx = wx + cxo + rng.randint(-4, 4)
-                gh = int((10 + rng.randint(0, 8)) * sc)
-                pygame.draw.line(surf, (48, 120, 58, a),
-                                 (gx, wy), (gx + rng.randint(-3, 3), wy - gh),
-                                 max(1, int(1.5 * sc)))
+        n_cl = max(2, int(rng.randint(2, 4) * (0.6 + 0.4 * suppress)))
+        clus_ang = rng.uniform(-0.4, 0.4)                   # 群れ全体の傾き
+        cca, csa = math.cos(clus_ang), math.sin(clus_ang)
+        # 下地の薄い暗色帯 (端はにじんで終わる)
+        pygame.draw.ellipse(surf, (10, 40, 26, int(min(80, a) * 0.9)),
+                            (wx - spread, wy - 5, spread * 2, 12))
+        w = max(1, int(1.5 * sc))
+        for _cl in range(n_cl):
+            # サブクラスタ中心: 傾き楕円上・中心寄せ
+            rad = rng.random() ** 0.6
+            cang = rng.uniform(0, 2 * math.pi)
+            ex = math.cos(cang) * rad
+            ey = math.sin(cang) * rad * 0.5
+            ccx = wx + int((ex * cca - ey * csa) * spread)
+            ccy = wy + int((ex * csa + ey * cca) * spread * 0.6)
+            dens = rng.uniform(0.5, 1.0)                    # クラスタごとの濃淡
+            blades = max(3, int(rng.randint(4, 8) * dens))
+            cw = int(rng.uniform(6, 12) * sc)
+            aa = int(a * (0.6 + 0.4 * dens))
+            for _b in range(blades):
+                t = rng.uniform(-1, 1); t = t * abs(t)      # 房内も中心密
+                gx = ccx + int(t * cw)
+                gy = ccy + rng.randint(-3, 3)               # 個別y (行感を壊す)
+                gh = int((9 + rng.randint(0, 9)) * sc)
+                r = rng.random()
+                col = (40, 104, 50) if r < 0.4 else (
+                       (56, 128, 62) if r < 0.75 else (80, 150, 74))
+                pygame.draw.line(surf, (*col, aa),
+                                 (gx, gy), (gx + rng.randint(-3, 3), gy - gh), w)
 
     def _sl_reed_bed(self, surf, wx, wy, sc, st, rng, a, suppress=1.0):
         # D-2.5: 「まとまった葦原」に見せる。房(clump)を楕円パッチ内に配置し、
@@ -1046,6 +1121,7 @@ class FishingView:
                 t = rng.uniform(-1, 1)
                 t = t * abs(t)                        # 房内も中心密・外側疎
                 gx = cx + int(t * cw)
+                gy = base_wy + rng.randint(-2, 2)          # D-3.1: 個別yで行感を壊す
                 gh = int(base_h * rng.uniform(0.7, 1.12))
                 tip_dx = int((lean + rng.uniform(-0.12, 0.12)) * gh)
                 rr = rng.random()
@@ -1055,11 +1131,11 @@ class FishingView:
                     col = (96, 132, 58, ca)           # 本体 黄緑〜オリーブ
                 else:
                     col = (120, 150, 70, ca)          # 明るめ
-                pygame.draw.line(surf, col, (gx, base_wy), (gx + tip_dx, base_wy - gh), w)
+                pygame.draw.line(surf, col, (gx, gy), (gx + tip_dx, gy - gh), w)
                 if rng.random() < 0.3:               # 数本だけ穂先を明るく
                     pygame.draw.line(surf, (170, 155, 80, int(ca * 0.85)),
-                                     (gx + tip_dx, base_wy - gh),
-                                     (gx + tip_dx, base_wy - gh - int(5 * sc)),
+                                     (gx + tip_dx, gy - gh),
+                                     (gx + tip_dx, gy - gh - int(5 * sc)),
                                      max(1, w - 1))
 
     def _sl_lily_pads(self, surf, wx, wy, sc, st, rng, a, suppress=1.0):
