@@ -79,6 +79,14 @@ UW_GRID_Y  = 46
 # StructureObject の見た目は spot_id から決定的なので一度焼いたら使い回す。
 _STRUCTURE_LAYER_CACHE: dict = {}
 
+# Phase D-3.2: レイヤー切り分けフラグ。
+#   旧 _struct_surf は underwater map のセル単位で岩/カバー/ウィード/ブレイクを
+#   描く「マス目状」レイヤー。D-2 以降は StructureObject baked layer
+#   (_structure_layer) を主表示にする方針なので、通常時は旧レイヤーを止める。
+#   True にすると旧セルグリッド描画を復活させられる (デバッグ/比較用)。
+SHOW_LEGACY_STRUCT_SURF = False
+SHOW_STRUCTURE_LAYER     = True
+
 BITE_FRAMES   = 150
 RESULT_FRAMES = 200
 
@@ -1229,6 +1237,13 @@ class FishingView:
         "stump_field": "stump", "brush_pile": "brush",
     }
 
+    # D-3.2: 各タイプの概算 描画半径 (sc=1.0 基準)。bbox デバッグ表示用。
+    _STRUCT_DBG_HALF = {
+        "stake_cluster": 24, "laydown": 62, "weed_bed": 30,
+        "reed_bed": 44, "lily_pads": 38, "rock_pile": 34,
+        "stump_field": 30, "brush_pile": 26,
+    }
+
     def _draw_structure_debug(self, surface: pygame.Surface) -> None:
         """F2デバッグ: StructureObject 中心にマーカー + type/variant/hotspot を表示。
 
@@ -1252,6 +1267,12 @@ class FishingView:
             sy = wy_full
             if not (-20 <= sx <= MAIN_W + 20):
                 continue
+            # D-3.2: 描画範囲 bbox (新レイヤーが実際にどこを占めているか確認用)
+            depth_t = max(0.0, min(1.0, st.y / vd))
+            sc = st.scale * self._TIER_MULT_D.get(st.tier, 1.0) * (0.55 + 0.75 * depth_t)
+            half = int(self._STRUCT_DBG_HALF.get(st.type, 30) * sc)
+            pygame.draw.rect(surface, (80, 230, 255),
+                             (sx - half, sy - int(half * 1.1), half * 2, int(half * 1.4)), 1)
             pygame.draw.circle(surface, (255, 60, 200), (sx, sy), 4)
             pygame.draw.circle(surface, (255, 255, 255), (sx, sy), 4, 1)
             if self.font_sm is None:
@@ -2532,15 +2553,15 @@ class FishingView:
         if self.debug_mode and self._depth_debug_surf is not None:
             surface.blit(self._depth_debug_surf, (int(-self.cam_x), 0))
 
-        # ── ストラクチャー常時表示 (水中の影 + 水上の立ち木/岩/ウィード) ──
-        # Exploration v2: 世界幅で構築し、カメラぶん左へずらして描く。
-        # ※ _struct_surf を WORLD_W 幅で再生成する変更は grid-widening 側で行う。
-        if self._struct_surf is not None:
+        # ── 旧 _struct_surf (underwater map セル単位のマス目状ストラクチャー) ──
+        # D-3.2: 通常時は非表示。StructureObject baked layer を主表示にするため、
+        # このセルグリッド描画が「マス目状の岩/ウィード」の正体。フラグで復活可。
+        if SHOW_LEGACY_STRUCT_SURF and self._struct_surf is not None:
             surface.blit(self._struct_surf, (int(-self.cam_x), 0))
 
         # ── Phase D-1: StructureObject レイヤー (spot.structures を焼いたもの) ──
         # 毎フレーム blit のみ。生成は init_fonts / spot単位キャッシュ済み。
-        if self._structure_layer is not None:
+        if SHOW_STRUCTURE_LAYER and self._structure_layer is not None:
             surface.blit(self._structure_layer, (int(-self.cam_x), 0))
 
         # F2デバッグ時のみ StructureObject 中心にマーカー/ラベルを出す
