@@ -1103,8 +1103,9 @@ class FishingView:
         # D-3.3: 旧グリッド層OFF後の量感を復活。広めに散る 3〜6個の小クラスター
         # の集合にし、各クラスタの本数/alphaを上げる。ただし均等配置には戻さず、
         # 中心密・外周疎・ところどころ抜けを維持する。
-        spread = int(42 * sc)
-        n_cl = max(3, int((3 + 3 * st.density) * (0.6 + 0.4 * suppress)))
+        spread = int(48 * sc)
+        # D-3.5: 面積と密度をやや増やす。濃い塊(中心) + 薄い周縁の構成は維持。
+        n_cl = max(4, int((4 + 4 * st.density) * (0.6 + 0.4 * suppress)))
         clus_ang = rng.uniform(-0.4, 0.4)                   # 群れ全体の傾き
         cca, csa = math.cos(clus_ang), math.sin(clus_ang)
         # 下地の薄い暗色帯 (端はにじんで終わる)
@@ -1122,7 +1123,7 @@ class FishingView:
             ccx = wx + int((ex * cca - ey * csa) * spread)
             ccy = wy + int((ex * csa + ey * cca) * spread * 0.6)
             dens = rng.uniform(0.55, 1.0)                   # クラスタごとの濃淡
-            blades = max(4, int(rng.randint(5, 9) * dens))
+            blades = max(5, int(rng.randint(6, 11) * dens))
             cw = int(rng.uniform(7, 13) * sc)
             aa = int(a * (0.72 + 0.28 * dens))
             for _b in range(blades):
@@ -1139,8 +1140,9 @@ class FishingView:
     def _sl_reed_bed(self, surf, wx, wy, sc, st, rng, a, suppress=1.0):
         # D-3.3: 岸際の葦群生として量感を強める。房を増やし、茎を太く/濃くし、
         # 房ごとに水際の暗い根元帯を足す。中心密・外周疎・ポケットは維持。
-        spread = int(44 * sc)
-        n_clumps = max(4, min(7, int((4 + 3 * st.density) * (0.6 + 0.4 * suppress))))
+        spread = int(46 * sc)
+        # D-3.5: 植生のみ量感アップ。房数を増やして群生感を強める (pocket/edge は残す)。
+        n_clumps = max(5, min(9, int((5 + 4 * st.density) * (0.6 + 0.4 * suppress))))
         # 群生全体の下地 (薄い暗色帯)
         pygame.draw.ellipse(surf, (18, 48, 30, int(min(105, a) * 0.9)),
                             (wx - spread, wy - 3, spread * 2, 13))
@@ -1160,7 +1162,7 @@ class FishingView:
             cw = int(rng.uniform(7, 13) * sc)
             base_h = rng.uniform(24, 46) * sc * (0.7 + 0.3 * (1.0 - rad))  # 中心=高い
             lean = rng.uniform(-0.18, 0.18)           # 房ごとの傾き癖
-            blades = max(3, int(rng.uniform(5, 9) * (0.6 + 0.6 * st.density) * edge_fade))
+            blades = max(4, int(rng.uniform(7, 12) * (0.6 + 0.6 * st.density) * edge_fade))
             ca = int(a * (0.78 + 0.22 * (1.0 - rad)))  # 外周は薄い alpha
             # 房の水際の暗い根元帯 (葦が生える岸際の陰)
             pygame.draw.ellipse(surf, (14, 40, 26, int(ca * 0.7)),
@@ -1189,8 +1191,9 @@ class FishingView:
     def _sl_lily_pads(self, surf, wx, wy, sc, st, rng, a, suppress=1.0):
         # D-3.3: 水面カバーとしての量感を強める。葉数を増やし少し大きくする。
         #        pad_hole / pad_lane / 大小・欠け・外周散りは維持。
-        spread = int(38 * sc)
-        pads = max(6, int(max(7, min(14, int(8 + 6 * st.density))) * suppress))
+        spread = int(40 * sc)
+        # D-3.5: 葉数を増やし水面カバー感を強める (pad_hole / lane は残す)。
+        pads = max(8, int(max(9, min(18, int(10 + 8 * st.density))) * suppress))
         # 群生全体の薄い暗色 (水面シェード感)
         pygame.draw.ellipse(surf, (6, 26, 34, int(a * 0.32)),
                             (wx - spread, wy - int(spread * 0.4) + 3,
@@ -1215,9 +1218,9 @@ class FishingView:
                 continue
             px = wx + int(fx * spread) + rng.randint(-2, 2)   # 外周ギザつき
             py = wy + int(fy * spread * 0.7)
-            r = rng.random()                            # 大小 3クラス
-            base = 5 if r < 0.30 else (8 if r < 0.75 else 11)
-            pr = int(base * sc * rng.uniform(0.85, 1.15))
+            r = rng.random()                            # 大小 3クラス (幅を少し広げる)
+            base = 5 if r < 0.30 else (9 if r < 0.75 else 13)
+            pr = int(base * sc * rng.uniform(0.82, 1.22))
             if pr < 2:
                 continue
             pw, ph = pr * 2, int(pr * rng.uniform(1.3, 1.7))  # 潰れた楕円
