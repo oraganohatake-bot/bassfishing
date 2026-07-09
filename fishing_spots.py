@@ -67,12 +67,14 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         depth_profile="steep_break",
         # D-2.6: 岩場 + 旧桟橋跡のポイント。岩を主役に、杭列は離した位置で
         # 岸→沖の桟橋跡 (old_pier_remnant; 近くに葦が無いので決定的) に見せる。
+        # D-3.4: 岩を主役として中央〜右に大きく、杭列は岸→沖の桟橋跡として
+        #   十分な存在感で見せる。狙い目は「岩の外周」と「杭の横」の2か所。
         structures=[
-            StructureObject(type="rock_pile", x=21.0, y=8.0,
-                            scale=1.15, rotation=0.0, density=0.8,
+            StructureObject(type="rock_pile", x=20.0, y=10.0,
+                            scale=1.4, rotation=0.0, density=0.85,
                             seed=1011, tier="HERO"),
-            StructureObject(type="stake_cluster", x=8.0, y=15.0,
-                            scale=1.0, rotation=0.0, density=0.75,
+            StructureObject(type="stake_cluster", x=9.0, y=14.0,
+                            scale=1.2, rotation=0.0, density=0.8,
                             seed=1012, tier="MID"),
         ],
     ),

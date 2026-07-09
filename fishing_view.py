@@ -87,6 +87,13 @@ _STRUCTURE_LAYER_CACHE: dict = {}
 SHOW_LEGACY_STRUCT_SURF = False
 SHOW_STRUCTURE_LAYER     = True
 
+# Phase D-3.4: StructureObject を「狙うべき場所」として十分な存在感にする。
+#   D-3.2で旧グリッド層をOFFにした結果、新レイヤーの主役が広い水面に対して
+#   小さすぎ「水に浮いた小物」に見えていた。表示スケールを底上げし、遠近縮小の
+#   最小値も引き上げて奥側でも読めるサイズにする。配置(x/y/seed)は据え置きなので
+#   baked cache / deterministic seed はそのまま維持される。
+STRUCT_VISUAL_SCALE = 1.5     # 全ストラクチャー共通の見た目スケール底上げ
+
 BITE_FRAMES   = 150
 RESULT_FRAMES = 200
 
@@ -639,7 +646,8 @@ class FishingView:
     # spot.structures (StructureObject) を一度だけ簡易シルエットで焼き込み、
     # 毎フレームは blit するだけにする。強化描画は次フェーズ以降。
 
-    _TIER_MULT_D = {"LOW": 0.75, "MID": 1.0, "HERO": 1.25}
+    # D-3.4: HERO を一段大きく (主役の存在感)、LOW も豆粒化しない下限に。
+    _TIER_MULT_D = {"LOW": 0.85, "MID": 1.0, "HERO": 1.4}
 
     # D-2.5: 重なり時の表示優先度。大きいほど強い(主役)。
     #   3 = 硬い構造物 (倒木/岩/杭/ブラッシュ/切株)
@@ -711,8 +719,11 @@ class FishingView:
             drawer = drawers.get(stype)
             if drawer is None:
                 continue
-            persp = 0.55 + 0.75 * depth_t                       # 手前=大
-            sc = st.scale * self._TIER_MULT_D.get(st.tier, 1.0) * persp
+            # D-3.4: 遠近縮小の最小値を 0.55→0.75 に引き上げ、奥側でも葦/杭/岩が
+            #        読めるサイズにする。全体に STRUCT_VISUAL_SCALE を掛けて底上げ。
+            persp = 0.75 + 0.65 * depth_t                       # 手前=大 / 奥も豆粒化しない
+            sc = (st.scale * self._TIER_MULT_D.get(st.tier, 1.0)
+                  * persp * STRUCT_VISUAL_SCALE)
             alpha = max(120, min(235, int(150 + depth_t * 70)))  # 手前=濃
             rng = random.Random(st.seed)
             # 上位ストラクチャーの近くでは下位を薄く/間引く
@@ -774,9 +785,12 @@ class FishingView:
         pygame.draw.ellipse(surf, (8, 24, 42, min(120, a)),
                             (wx - rw, wy - rh // 2, rw * 2, rh))
 
-    def _draw_one_stake(self, surf, px, base_wy, sc, rng, a, broken_p):
-        """1本の杭を描く (幹・影・水際の黒ずみ・天面/折れ)。"""
-        h = int(rng.uniform(16, 42) * sc)                    # 高さ差(大)
+    def _draw_one_stake(self, surf, px, base_wy, sc, rng, a, broken_p, h_boost=1.0):
+        """1本の杭を描く (幹・影・水際の黒ずみ・天面/折れ)。
+
+        h_boost: 杭頭を水面上へ突き出させるための高さ倍率 (>1で高くなる)。
+        """
+        h = int(rng.uniform(16, 42) * sc * h_boost)          # 高さ差(大)
         w = max(2, int(rng.uniform(2.6, 4.2) * sc))          # 太さ差
         tilt = int(rng.uniform(-0.16, 0.16) * h)             # 傾き(混在方向)
         top_x, top_y = px + tilt, base_wy - h
@@ -814,6 +828,10 @@ class FishingView:
         # cluster全体のうっすら影
         self._sl_base_shadow(surf, wx, wy, spread * 0.8, 9, a)
         broken_p = 0.10 if reed_fence else 0.32
+        # D-3.4: 杭は必ず水面上に頭が出るよう高さを底上げする。
+        #   桟橋跡(old_pier_remnant)はより高く突き出し「足場の柱」に、
+        #   葦縁の杭(reed_fence)も水面上に頭が見えるよう控えめに高くする。
+        h_boost = 1.35 if reed_fence else 1.7
 
         if reed_fence:
             # 葦縁に沿う弧状ライン (中央がせり出す)
@@ -823,7 +841,8 @@ class FishingView:
                 base_t = (i - (count - 1) / 2) / max(1, count - 1)   # -0.5..0.5
                 px = wx + int(base_t * spread * 2) + rng.randint(-4, 4)
                 y_arc = int(arc_sign * arc * spread * (1.0 - (2 * base_t) ** 2))
-                self._draw_one_stake(surf, px, wy + y_arc, sc, rng, a, broken_p)
+                self._draw_one_stake(surf, px, wy + y_arc, sc, rng, a, broken_p,
+                                     h_boost=h_boost)
         else:
             # 桟橋跡: 沖(奥/上)へ向かう斜めの主ライン。たまに2列にして「足場」に。
             slope = rng.uniform(0.22, 0.5) * rng.choice((-1, 1))     # 斜め方向
@@ -834,11 +853,13 @@ class FishingView:
                 base_t = (i - (count - 1) / 2) / max(1, count - 1)   # -0.5..0.5
                 px = wx + int(base_t * spread * 2) + rng.randint(-2, 2)
                 py = wy + int(base_t * spread * slope)               # 斜めライン
-                self._draw_one_stake(surf, px, py, sc, rng, a, broken_p)
+                self._draw_one_stake(surf, px, py, sc, rng, a, broken_p,
+                                     h_boost=h_boost)
                 # 2列目 (桟橋の反対側の足): 本数は間引く
                 if two_rows and rng.random() < 0.7:
                     self._draw_one_stake(surf, px + row_dx + rng.randint(-2, 2),
-                                         py + row_dy, sc, rng, a, broken_p)
+                                         py + row_dy, sc, rng, a, broken_p,
+                                         h_boost=h_boost)
 
     def _sl_laydown(self, surf, wx, wy, sc, st, rng, a):
         """倒木: 太さ・根元(root ball)・枝・影を持つ水中カバーとして描く。
@@ -1288,7 +1309,8 @@ class FishingView:
                 continue
             # D-3.2: 描画範囲 bbox (新レイヤーが実際にどこを占めているか確認用)
             depth_t = max(0.0, min(1.0, st.y / vd))
-            sc = st.scale * self._TIER_MULT_D.get(st.tier, 1.0) * (0.55 + 0.75 * depth_t)
+            sc = (st.scale * self._TIER_MULT_D.get(st.tier, 1.0)
+                  * (0.75 + 0.65 * depth_t) * STRUCT_VISUAL_SCALE)
             half = int(self._STRUCT_DBG_HALF.get(st.type, 30) * sc)
             pygame.draw.rect(surface, (80, 230, 255),
                              (sx - half, sy - int(half * 1.1), half * 2, int(half * 1.4)), 1)

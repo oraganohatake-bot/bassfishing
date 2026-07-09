@@ -1,6 +1,6 @@
 # Build/version id — DBG/F2 デバッグON時に画面へ表示し、Web(pygbag)配信時に
 # スマホが最新 payload を掴んでいるかを一発で切り分けるための識別子。
-BUILD_ID = "D3.3 vegetation-return"
+BUILD_ID = "D3.4 structure-scale"
 
 SCREEN_W = 1280
 SCREEN_H = 720
