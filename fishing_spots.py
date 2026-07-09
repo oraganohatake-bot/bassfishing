@@ -69,13 +69,20 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         # 岸→沖の桟橋跡 (old_pier_remnant; 近くに葦が無いので決定的) に見せる。
         # D-3.4: 岩を主役として中央〜右に大きく、杭列は岸→沖の桟橋跡として
         #   十分な存在感で見せる。狙い目は「岩の外周」と「杭の横」の2か所。
+        # D-3.6: 空白感低減の ambient を1個だけ (手前右)。主役の岩は邪魔しない。
         structures=[
+            # hero: 中央〜右奥の岩塊
             StructureObject(type="rock_pile", x=20.0, y=10.0,
                             scale=1.4, rotation=0.0, density=0.85,
                             seed=1011, tier="HERO"),
+            # support: 岸→沖の桟橋跡 (杭列)
             StructureObject(type="stake_cluster", x=9.0, y=14.0,
                             scale=1.2, rotation=0.0, density=0.8,
                             seed=1012, tier="MID"),
+            # ambient: 手前右にぽつっと小ウィード
+            StructureObject(type="weed_bed", x=25.0, y=18.5,
+                            scale=0.6, rotation=0.0, density=0.4,
+                            seed=1013, tier="LOW"),
         ],
     ),
     "spot_02": FishingSpot(
@@ -87,23 +94,28 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         depth_profile="shallow_flat",
         # D-2.6: 役割分担した構図。奥左に葦原、その縁に古い杭列(reed_fence)、
         # 手前右にリリーパッド、中央手前に下地のウィード。中心をベタ重ねしない。
+        # D-3.6: 良い構図なので ambient は1個だけ (手前右)。役割分担は崩さない。
         structures=[
-            # 奥・左岸際の葦原 (横に長め・高密度)
+            # support: 奥・左岸際の葦原 (横に長め・高密度)
             StructureObject(type="reed_bed", x=6.0, y=5.0,
                             scale=1.25, rotation=8.0, density=0.9,
                             seed=2012, tier="MID"),
-            # 葦原の外側エッジ沿いの古い杭列 → _stake_variant が reed_fence 判定
+            # support: 葦原の外側エッジ沿いの古い杭列 → _stake_variant が reed_fence 判定
             StructureObject(type="stake_cluster", x=8.5, y=6.5,
                             scale=0.9, rotation=0.0, density=0.6,
                             seed=2014, tier="LOW"),
-            # 手前右のリリーパッド (葦・ウィードから離す)
+            # support: 手前右のリリーパッド (葦・ウィードから離す)
             StructureObject(type="lily_pads", x=13.0, y=8.5,
                             scale=1.1, rotation=15.0, density=0.75,
                             seed=2013, tier="MID"),
-            # 中央手前の下地ウィード (広め・薄め; reed/lily の真下に重ねない)
+            # hero: 中央手前の下地ウィード (広め・薄め; reed/lily の真下に重ねない)
             StructureObject(type="weed_bed", x=11.0, y=11.0,
                             scale=1.4, rotation=0.0, density=0.6,
                             seed=2011, tier="HERO"),
+            # ambient: 手前右の余白に小ウィード
+            StructureObject(type="weed_bed", x=23.0, y=13.0,
+                            scale=0.55, rotation=0.0, density=0.4,
+                            seed=2015, tier="LOW"),
         ],
     ),
     "spot_03": FishingSpot(
@@ -116,15 +128,29 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         # D-2.7: 岸沿いの葦際ポイント。主役=奥右の葦原、補助=手前の薄い下地
         # ウィード1つのみ。spot_02 との差別化でリリー・杭は置かない。
         # 狙い目は葦の切れ目 (reed_pocket) と外側エッジ (outside_edge)。
+        # D-3.6: やや寂しいので ambient を3個散らす (左中・手前右・左奥岸際)。
+        #   直線/等間隔にならない位置に置き、主役の葦は潰さない。
         structures=[
-            # 主役: 奥・右岸際の葦原
+            # hero: 奥・右岸際の葦原
             StructureObject(type="reed_bed", x=20.0, y=6.0,
                             scale=1.35, rotation=-8.0, density=0.9,
                             seed=3011, tier="MID"),
-            # 補助: 手前側の下地ウィード (D-3.3: 量感UPで岸際感を出す)
+            # support: 手前側の下地ウィード (D-3.3: 量感UPで岸際感を出す)
             StructureObject(type="weed_bed", x=13.0, y=16.0,
                             scale=1.45, rotation=0.0, density=0.75,
                             seed=3012, tier="LOW"),
+            # ambient: 左中の朽ちた単杭寄り (葦から離れ old_pier_remnant)
+            StructureObject(type="stake_cluster", x=7.0, y=10.0,
+                            scale=0.6, rotation=0.0, density=0.35,
+                            seed=3013, tier="LOW"),
+            # ambient: 手前右の小ウィード
+            StructureObject(type="weed_bed", x=24.0, y=18.0,
+                            scale=0.6, rotation=0.0, density=0.4,
+                            seed=3014, tier="LOW"),
+            # ambient: 左奥岸際のわずかな葦
+            StructureObject(type="reed_bed", x=4.0, y=5.0,
+                            scale=0.7, rotation=6.0, density=0.45,
+                            seed=3015, tier="LOW"),
         ],
     ),
     "spot_04": FishingSpot(
@@ -134,16 +160,24 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         grid_cols=32, grid_rows=24,
         base_depth_m=1.0, max_depth_m=2.0,
         depth_profile="normal_slope",
+        # D-3.6: 倒木主役は維持。ambient は1個だけ (左手前の小ウィード)。
         structures=[
+            # hero: 手前の倒木
             StructureObject(type="laydown", x=18.0, y=15.0,
                             scale=1.0, rotation=-12.0, density=0.8,
                             seed=12031, tier="HERO"),
+            # support: 奥左の小倒木
             StructureObject(type="laydown", x=9.0, y=8.0,
                             scale=0.8, rotation=20.0, density=0.6,
                             seed=4041, tier="MID"),
+            # support: 右奥の切り株フィールド
             StructureObject(type="stump_field", x=24.0, y=18.0,
                             scale=1.0, rotation=0.0, density=0.7,
                             seed=4042, tier="LOW"),
+            # ambient: 左手前の小ウィード
+            StructureObject(type="weed_bed", x=6.0, y=16.0,
+                            scale=0.6, rotation=0.0, density=0.4,
+                            seed=4043, tier="LOW"),
         ],
     ),
     "spot_05": FishingSpot(
@@ -156,15 +190,20 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         # D-2.7: 浅いフラットのパッド撃ちに特化。主役=中〜手前のリリーパッド、
         # 補助=外側の薄いウィードのみ。葦・杭は置かない。
         # 狙い目はパッドの穴 (pad_hole) と通し筋/外周 (pad_lane / pad_edge)。
+        # D-3.6: リリー主役は維持。ambient は右側に単杭寄りを1個 (lane/hole は残す)。
         structures=[
-            # 主役: 中央やや手前のリリーパッド (穴/laneが見える大きさ)
+            # hero: 中央やや手前のリリーパッド (穴/laneが見える大きさ)
             StructureObject(type="lily_pads", x=14.0, y=11.0,
                             scale=1.2, rotation=12.0, density=0.75,
                             seed=5011, tier="HERO"),
-            # 補助: 外側手前の下地ウィード (薄め)
+            # support: 外側手前の下地ウィード (薄め)
             StructureObject(type="weed_bed", x=9.0, y=15.0,
                             scale=1.3, rotation=0.0, density=0.5,
                             seed=5012, tier="LOW"),
+            # ambient: 右側の朽ちた単杭寄り (リリーから離す)
+            StructureObject(type="stake_cluster", x=22.0, y=13.0,
+                            scale=0.55, rotation=0.0, density=0.35,
+                            seed=5013, tier="LOW"),
         ],
     ),
     "spot_06": FishingSpot(
@@ -174,13 +213,24 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         grid_cols=32, grid_rows=24,
         base_depth_m=0.8, max_depth_m=2.2,
         depth_profile="shallow_flat",
+        # D-3.6: brush/laydown 主役は維持。ambient を2個 (左中の小ウィード + 手前の単杭)。
         structures=[
+            # hero: 中央のブラッシュパイル
             StructureObject(type="brush_pile", x=14.0, y=12.0,
                             scale=1.1, rotation=0.0, density=0.85,
                             seed=6011, tier="HERO"),
+            # support: 右の倒木
             StructureObject(type="laydown", x=22.0, y=16.0,
                             scale=0.9, rotation=8.0, density=0.7,
                             seed=6012, tier="MID"),
+            # ambient: 左中の小ウィード
+            StructureObject(type="weed_bed", x=7.0, y=10.0,
+                            scale=0.6, rotation=0.0, density=0.4,
+                            seed=6013, tier="LOW"),
+            # ambient: 手前中央寄りの単杭寄り
+            StructureObject(type="stake_cluster", x=10.0, y=19.0,
+                            scale=0.55, rotation=0.0, density=0.35,
+                            seed=6014, tier="LOW"),
         ],
     ),
     "spot_07": FishingSpot(
@@ -193,15 +243,24 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         # D-2.7: 急なブレイク沿いの倒木ポイント。主役=岸から沖へ斜めに伸びる
         # 倒木、補助=少し離した切り株フィールド LOW のみ。植物系は増やさない。
         # 狙い目は根元のえぐれ (root_hole) と枝先/影 (branch_tip / shade_line)。
+        # D-3.6: 倒木主役は維持。ambient を2個 (右奥の薄いウィード + 左手前の単杭)。
         structures=[
-            # 主役: 手前(浅)→奥(深)へ斜めに倒れ込む倒木
+            # hero: 手前(浅)→奥(深)へ斜めに倒れ込む倒木
             StructureObject(type="laydown", x=12.0, y=13.0,
                             scale=1.1, rotation=-25.0, density=0.8,
                             seed=7011, tier="HERO"),
-            # 補助: 離れた位置の切り株フィールド (絡み過ぎない)
+            # support: 離れた位置の切り株フィールド (絡み過ぎない)
             StructureObject(type="stump_field", x=22.0, y=17.0,
                             scale=0.9, rotation=0.0, density=0.6,
                             seed=7012, tier="LOW"),
+            # ambient: 右奥の薄いウィード
+            StructureObject(type="weed_bed", x=24.0, y=9.0,
+                            scale=0.55, rotation=0.0, density=0.35,
+                            seed=7013, tier="LOW"),
+            # ambient: 左手前の単杭寄り
+            StructureObject(type="stake_cluster", x=6.0, y=18.0,
+                            scale=0.55, rotation=0.0, density=0.35,
+                            seed=7014, tier="LOW"),
         ],
     ),
     "spot_08": FishingSpot(
@@ -214,15 +273,24 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         # D-2.7: 深場のハードボトム一点狙い。主役=深場寄りの岩、補助=少し離した
         # 小さめの岩 LOW のみ。リリー・葦・杭は置かない。深く暗い雰囲気は既存地形任せ。
         # 狙い目は岩の隙間 (rock_crevice) とハードボトムの縁 (hard_bottom_edge)。
+        # D-3.6: 深場 rock hero を維持。岩は増やさず ambient を2個 (手前ウィード + 左単杭)。
         structures=[
-            # 主役: 奥(深場)寄りの岩塊
+            # hero: 奥(深場)寄りの岩塊
             StructureObject(type="rock_pile", x=18.0, y=7.0,
                             scale=1.2, rotation=0.0, density=0.85,
                             seed=8011, tier="HERO"),
-            # 補助: 少し離した小さめの岩 (主役の真上に重ねない)
+            # support: 少し離した小さめの岩 (主役の真上に重ねない)
             StructureObject(type="rock_pile", x=25.0, y=12.0,
                             scale=0.85, rotation=0.0, density=0.6,
                             seed=8012, tier="LOW"),
+            # ambient: 手前中央の小ウィード (深場の空白を埋める中景/手前カバー)
+            StructureObject(type="weed_bed", x=14.0, y=17.0,
+                            scale=0.6, rotation=0.0, density=0.4,
+                            seed=8013, tier="LOW"),
+            # ambient: 左中の単杭寄り
+            StructureObject(type="stake_cluster", x=8.0, y=12.0,
+                            scale=0.55, rotation=0.0, density=0.35,
+                            seed=8014, tier="LOW"),
         ],
     ),
     "spot_09": FishingSpot(
@@ -236,15 +304,24 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         # 補助=周囲の薄いウィードをエッジとして。杭は置かない。
         # 01/10 の岩+杭とは差別化し、岩+ウィードの島周りにする。
         # 狙い目はハードボトムの縁 (hard_bottom_edge) とウィードエッジ (weed_edge)。
+        # D-3.6: 岩+ウィードの島周りを維持。ambient を2個 (左手前の単杭 + 手前右の小ウィード)。
         structures=[
-            # 主役: ポイント先端側 (奥) の岩塊
+            # hero: ポイント先端側 (奥) の岩塊
             StructureObject(type="rock_pile", x=16.0, y=8.0,
                             scale=1.1, rotation=0.0, density=0.8,
                             seed=9011, tier="HERO"),
-            # 補助: 岩の外側に広がるウィードエッジ (D-3.3: 量感UP・少し内側へ)
+            # support: 岩の外側に広がるウィードエッジ (D-3.3: 量感UP・少し内側へ)
             StructureObject(type="weed_bed", x=19.5, y=13.0,
                             scale=1.45, rotation=0.0, density=0.7,
                             seed=9012, tier="LOW"),
+            # ambient: 左手前の単杭寄り
+            StructureObject(type="stake_cluster", x=8.0, y=15.0,
+                            scale=0.55, rotation=0.0, density=0.35,
+                            seed=9013, tier="LOW"),
+            # ambient: 手前右の小ウィード
+            StructureObject(type="weed_bed", x=24.0, y=18.0,
+                            scale=0.6, rotation=0.0, density=0.4,
+                            seed=9014, tier="LOW"),
         ],
     ),
     "spot_10": FishingSpot(
@@ -256,16 +333,24 @@ FISHING_SPOTS: dict[str, FishingSpot] = {
         depth_profile="steep_break",
         # D-2.6: 岩場 + 杭跡の複合。岩2つは中心をずらし、杭列は岩の真上でなく
         # 手前脇へ (old_pier_remnant として絡ませる)。中央に集めすぎない。
+        # D-3.6: 岩+杭の構図は維持。ambient は手前の小ウィードを1個だけ。
         structures=[
+            # hero: 左奥の岩塊
             StructureObject(type="rock_pile", x=13.0, y=9.0,
                             scale=1.3, rotation=0.0, density=0.9,
                             seed=1001, tier="HERO"),
+            # support: 右の第二の岩
             StructureObject(type="rock_pile", x=25.0, y=14.0,
                             scale=0.9, rotation=0.0, density=0.7,
                             seed=1002, tier="MID"),
+            # support: 手前左脇の杭列 (old_pier_remnant)
             StructureObject(type="stake_cluster", x=7.0, y=18.0,
                             scale=1.0, rotation=0.0, density=0.7,
                             seed=1003, tier="LOW"),
+            # ambient: 手前中央の小ウィード
+            StructureObject(type="weed_bed", x=19.0, y=20.0,
+                            scale=0.6, rotation=0.0, density=0.4,
+                            seed=1004, tier="LOW"),
         ],
     ),
 }
